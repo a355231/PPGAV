@@ -1,0 +1,35 @@
+name: build-test-security
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build with warnings as errors
+        run: dotnet build .\PPGAV\PPGAV.csproj -c Release -p:TreatWarningsAsErrors=true
+      - name: Build smoke tests
+        run: dotnet build .\tests\PPGAV.SmokeTests.csproj -c Release -p:TreatWarningsAsErrors=true
+      - name: Run smoke tests
+        run: .\tests\bin\Release\net10.0-windows\PPGAV.SmokeTests.exe
+      - name: Generate dependency inventory
+        run: dotnet list .\PPGAV\PPGAV.csproj package --include-transitive --format json > sbom-dotnet.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-dotnet.json
+      - name: Static analysis
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+      - uses: github/codeql-action/analyze@v3

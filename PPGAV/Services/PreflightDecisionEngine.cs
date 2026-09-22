@@ -6,7 +6,7 @@ public static class PreflightDecisionEngine
 {
     public static PreflightAction Decide(ScanReport report, bool defenderClean = true)
     {
-        if (!defenderClean || report.Errors.Count > 0 || report.HasCoreFinding && report.Findings.Count > 0)
+        if (!defenderClean || !string.IsNullOrEmpty(report.RootPath) && (!report.IsComplete || report.Errors.Count > 0 || report.SkippedPaths.Count > 0) || report.HasCoreFinding && report.Findings.Count > 0)
             return PreflightAction.BlockAll;
         return report.Findings.Count > 0 ? PreflightAction.LaunchSafeMode : PreflightAction.AllowSecure;
     }

@@ -36,10 +36,15 @@ public sealed class UpdateService
     {
         Directory.CreateDirectory(Path.Combine(AppPaths.Root, "Updates"));
         var path = Path.Combine(AppPaths.Root, "Updates", $"PPGAV-{update.Version}.msi");
-        await using (var source = await _http.GetStreamAsync(update.MsiUri, cancellationToken))
-        await using (var destination = File.Create(path)) await source.CopyToAsync(destination, cancellationToken);
-        if (!VerifySha256(path, update.Sha256)) { File.Delete(path); throw new InvalidDataException("The downloaded update failed its GitHub release digest verification."); }
-        return path;
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await using (var source = await _http.GetStreamAsync(update.MsiUri, cancellationToken))
+            await using (var destination = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true)) await source.CopyToAsync(destination, cancellationToken);
+            if (!VerifySha256(temporary, update.Sha256)) throw new InvalidDataException("The downloaded update failed its GitHub release digest verification.");
+            File.Move(temporary, path, true); return path;
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     public static bool IsNewerVersion(Version candidate, Version current) => candidate > current;

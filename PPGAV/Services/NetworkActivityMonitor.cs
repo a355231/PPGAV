@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Text.RegularExpressions;
 
 namespace PPGAV.Services;
@@ -14,9 +15,11 @@ public static class NetworkActivityMonitor
     {
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("netstat.exe", "-ano") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true });
+            using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "netstat.exe"), "-ano") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true });
             if (process is null) return [];
-            var lines = process.StandardOutput.ReadToEnd().SplitLines(); process.WaitForExit(3000);
+            var output = process.StandardOutput.ReadToEndAsync();
+            if (!process.WaitForExit(3000)) { try { process.Kill(true); } catch { } return []; }
+            var lines = output.GetAwaiter().GetResult().SplitLines();
             return ParseNetstat(lines);
         }
         catch { return []; }

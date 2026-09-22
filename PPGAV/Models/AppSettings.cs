@@ -7,7 +7,7 @@ public sealed class AppSettings
     public string BackupDirectory { get; set; } = string.Empty;
     public int BackupIntervalHours { get; set; } = 2;
     public int BackupRetentionCount { get; set; } = 8;
-    public bool StartWithWindows { get; set; } = true;
+    public bool StartWithWindows { get; set; }
     public bool StartMinimized { get; set; } = false;
     public bool ScanBeforeLaunch { get; set; } = true;
     public bool WatchProcess { get; set; } = true;
@@ -15,6 +15,7 @@ public sealed class AppSettings
     public bool RequireNetworkBlockInSafeMode { get; set; } = true;
     public bool AutomaticUpdates { get; set; } = true;
     public int UpdateCheckIntervalHours { get; set; } = 6;
+    public List<string> SandboxSavePaths { get; set; } = [];
 
     public void Normalize()
     {

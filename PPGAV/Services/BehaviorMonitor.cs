@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Net;
 using PPGAV.Interop;
 using PPGAV.Models;
 
@@ -79,14 +81,22 @@ public sealed class BehaviorMonitor
 
     private FileSystemWatcher CreateWatcher(string root, ScanScope scope, Action<BehaviorAlert> onAlert)
     {
-        var watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size, Filter = "*.*", EnableRaisingEvents = true };
+        var watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size, Filter = "*.*", EnableRaisingEvents = true, InternalBufferSize = 64 * 1024 };
+        var recent = new ConcurrentDictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
         FileSystemEventHandler handler = (_, args) =>
         {
-            var effectiveScope = scope == ScanScope.GameCore ? ScopeFor(root, args.FullPath) : scope;
-            var report = _scanner.ScanFile(args.FullPath, effectiveScope);
-            foreach (var finding in report.Findings)
-                Alert(onAlert, new BehaviorAlert(finding.Category, "Changed content detected", $"{finding.FilePath}: {finding.Rule}", finding.Category == ScanCategory.Malware));
+            try
+            {
+                if (recent.TryGetValue(args.FullPath, out var last) && DateTimeOffset.UtcNow - last < TimeSpan.FromMilliseconds(300)) return;
+                recent[args.FullPath] = DateTimeOffset.UtcNow;
+                var effectiveScope = scope == ScanScope.GameCore ? ScopeFor(root, args.FullPath) : scope;
+                var report = _scanner.ScanFile(args.FullPath, effectiveScope);
+                if (!report.IsComplete) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher inspection incomplete", $"Changed content could not be completely inspected: {args.FullPath}", true)); return; }
+                foreach (var finding in report.Findings) Alert(onAlert, new BehaviorAlert(finding.Category, "Changed content detected", $"{finding.FilePath}: {finding.Rule}", finding.Category == ScanCategory.Malware));
+            }
+            catch (Exception ex) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher failure", ex.Message, true)); }
         };
+        watcher.Error += (_, args) => Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher overflow", args.GetException().Message, true));
         watcher.Created += handler; watcher.Changed += handler;
         watcher.Renamed += (_, args) => handler(watcher, new FileSystemEventArgs(WatcherChangeTypes.Renamed, Path.GetDirectoryName(args.FullPath) ?? root, Path.GetFileName(args.FullPath)));
         return watcher;
@@ -94,8 +104,8 @@ public sealed class BehaviorMonitor
 
     private void Alert(Action<BehaviorAlert> callback, BehaviorAlert alert)
     {
-        _events.Log(alert.Title, alert.Detail, alert.Category);
-        callback(alert);
+        try { _events.Log(alert.Title, alert.Detail, alert.Category); callback(alert); }
+        catch (Exception ex) { _events.Log("Behavior monitor callback failed", ex.Message, ScanCategory.Suspicious); }
     }
 
     private static ScanScope ScopeFor(string root, string path)
@@ -108,8 +118,12 @@ public sealed class BehaviorMonitor
 
     private static bool IsExternalEndpoint(string remote)
     {
-        var value = remote.Split(':')[0];
-        return value is not ("*" or "0.0.0.0" or "127.0.0.1" or "::1" or "[::1]") && !value.StartsWith("127.", StringComparison.OrdinalIgnoreCase);
+        var value = remote.Trim();
+        if (value is "*:*" or "0.0.0.0:0" or "[::]:0") return false;
+        if (value.StartsWith("[", StringComparison.Ordinal) && value.IndexOf(']') is var close && close > 0) value = value[1..close];
+        else if (value.Count(c => c == ':') == 1) value = value[..value.IndexOf(':')];
+        if (IPAddress.TryParse(value, out var address)) return !IPAddress.IsLoopback(address) && !address.Equals(IPAddress.Any) && !address.Equals(IPAddress.IPv6Any);
+        return value is not ("*" or "0.0.0.0" or "::" or "127.0.0.1" or "::1") && !value.StartsWith("127.", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsSuspiciousModulePath(string path)

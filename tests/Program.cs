@@ -20,6 +20,7 @@ static class SmokeTests
             TestPreflightRoutesUntrustedAndCoreFindings();
             TestSandboxProviderSelection();
             TestIntegrityBaselineDetectsChangedCore(root);
+            TestIntegrityBaselineFailsClosed(root);
             TestQuarantineMovesOnlySelectedFiles(root);
             TestQuarantineLeavesCoreFilesInPlace(root);
             TestBinaryModIsFlagged(root);
@@ -85,7 +86,7 @@ static class SmokeTests
         File.WriteAllText(Path.Combine(workshop, "evil.ps1"), "powershell -encodedcommand AAAA");
         var discovered = GamePathDiscovery.FindWorkshopDirectories(game);
         Assert(discovered.Contains(workshop, StringComparer.OrdinalIgnoreCase), "external Steam Workshop root was not discovered");
-        var report = new ScannerService().ScanInstallation(game, discovered);
+        var report = new ScannerService().ScanInstallation(game, [workshop]);
         Assert(report.Findings.Any(f => f.Scope == ScanScope.SteamWorkshop && f.Category == ScanCategory.Malware), "external Workshop payload was not scanned as malware");
         _passed++;
     }
@@ -119,11 +120,27 @@ static class SmokeTests
         File.WriteAllText(file, "trusted-fixture");
         var baseline = Path.Combine(root, "integrity-baseline.json");
         var service = new IntegrityBaselineService(baseline);
-        Assert(service.CheckAndUpdate(game).Count == 0, "initial integrity baseline was not created cleanly");
+        Assert(service.Check(game, file).Any(f => f.Rule == "baseline-missing"), "missing integrity baseline was not fail-closed");
+        service.TrustCurrent(game, file, "smoke-test approval");
+        Assert(service.Check(game, file).Count == 0, "approved integrity baseline was not clean");
         File.WriteAllText(file, "changed-fixture");
-        Assert(service.CheckAndUpdate(game).Any(f => f.Rule == "trusted-file-changed"), "changed core file was not detected");
+        Assert(service.Check(game, file).Any(f => f.Rule == "trusted-file-changed"), "changed core file was not detected");
         File.WriteAllText(file, "changed-again");
-        Assert(service.CheckAndUpdate(game).Any(f => f.Rule == "trusted-file-changed"), "changed baseline was incorrectly replaced");
+        Assert(service.Check(game, file).Any(f => f.Rule == "trusted-file-changed"), "changed baseline was incorrectly replaced");
+        _passed++;
+    }
+
+    private static void TestIntegrityBaselineFailsClosed(string root)
+    {
+        var game = Path.Combine(root, "integrity-fail-closed"); Directory.CreateDirectory(game);
+        var executable = Path.Combine(game, "People Playground.exe"); File.WriteAllText(executable, "identity");
+        var baseline = Path.Combine(root, "integrity-fail-closed.json"); var service = new IntegrityBaselineService(baseline);
+        service.TrustCurrent(game, executable, "corruption-test approval");
+        File.WriteAllText(baseline, "tampered"); Assert(service.Check(game, executable).Any(f => f.Rule == "baseline-invalid"), "corrupt baseline was not blocked");
+        File.Delete(baseline); Assert(service.Check(game, executable).Any(f => f.Rule == "baseline-missing"), "deleted baseline was not blocked");
+        service.TrustCurrent(game, executable, "moved-test approval");
+        var moved = Path.Combine(root, "integrity-moved"); Directory.CreateDirectory(moved); var movedExecutable = Path.Combine(moved, "People Playground.exe"); File.Copy(executable, movedExecutable);
+        Assert(service.Check(moved, movedExecutable).Any(f => f.Rule == "baseline-installation-changed"), "moved installation was incorrectly trusted");
         _passed++;
     }
 
@@ -136,7 +153,7 @@ static class SmokeTests
         var good = Path.Combine(content, "good.txt");
         File.WriteAllText(bad, "bad"); File.WriteAllText(good, "good");
         var report = new ScanReport();
-        report.Findings.Add(new ScanFinding(ScanCategory.Malware, bad, "test", "bad", "hash", ScanScope.LocalMods, 100));
+        report.Findings.Add(new ScanFinding(ScanCategory.Malware, bad, "test", "bad", "", ScanScope.LocalMods, 100, DetectionKind.Confirmed));
         var moved = new QuarantineService(quarantine).Quarantine(report);
         Assert(moved.Count == 1 && !File.Exists(bad) && File.Exists(good), "quarantine moved the wrong files");
         Assert(File.Exists(moved[0].QuarantinedPath), "quarantine copy was not created");
@@ -292,7 +309,7 @@ static class SmokeTests
         var path = Path.Combine(root, "People Playground.exe");
         var first = service.RuleNameFor(path);
         var second = service.RuleNameFor(path);
-        Assert(first == second && first.StartsWith("PPGAV Safe Mode "), "firewall rule name is not deterministic");
+        Assert(first != second && first.StartsWith("PPGAV Safe Mode ") && second.StartsWith("PPGAV Safe Mode "), "firewall rule name is not uniquely owned");
         _passed++;
     }
 
@@ -315,8 +332,8 @@ static class SmokeTests
         Assert(blocker.Blocked, "safe mode did not request outbound network blocking");
         Assert(!Directory.Exists(Path.Combine(game, "Mods")), "safe mode left the Mods directory active");
         try { session.Process.Kill(true); } catch { }
-        session.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        Assert(Directory.Exists(Path.Combine(game, "Mods")), "safe mode did not restore the Mods directory");
+        try { session.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch (Exception ex) { throw new InvalidOperationException($"safe mode cleanup exception: {ex.Message}; failure={session.CleanupFailure}", ex); }
+        Assert(Directory.Exists(Path.Combine(game, "Mods")), $"safe mode did not restore the Mods directory; cleanup={session.CleanupFailure}; remaining={string.Join(",", Directory.GetFileSystemEntries(game))}");
         Assert(File.Exists(Path.Combine(game, "Mods", "test.cs")), "safe mode restore lost mod content");
         _passed++;
     }
@@ -342,6 +359,7 @@ static class SmokeTests
         }
 
         public bool TryRemove(string executablePath) => true;
+        public bool TryRemoveRule(string ruleName) => true;
     }
 
     private static void Assert(bool condition, string message)

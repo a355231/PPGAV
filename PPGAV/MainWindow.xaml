@@ -68,7 +68,7 @@
             <Border HorizontalAlignment="Right" Background="#102A27" BorderBrush="#245D52" BorderThickness="1" CornerRadius="18" Padding="14,8">
                 <StackPanel Orientation="Horizontal">
                     <Ellipse Width="9" Height="9" Fill="{StaticResource SafeBrush}" Margin="0,0,8,0" VerticalAlignment="Center" />
-                    <TextBlock x:Name="StatusText" Text="Protected" Foreground="{StaticResource SafeBrush}" FontWeight="SemiBold" />
+                    <TextBlock x:Name="StatusText" Text="Checking protection" Foreground="{StaticResource SuspiciousBrush}" FontWeight="SemiBold" />
                 </StackPanel>
             </Border>
         </Grid>

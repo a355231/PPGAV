@@ -62,21 +62,25 @@ public sealed class DefenderService
             psi.ArgumentList.Add("2");
         }
 
+        Process? running = null;
         try
         {
-            using var process = Process.Start(psi);
+            var process = Process.Start(psi); running = process;
             if (process is null) return new DefenderScanResult(false, -1, executable, "Could not start MpCmdRun.exe.");
-            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); timeout.CancelAfter(TimeSpan.FromMinutes(15));
+            var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+            await process.WaitForExitAsync(timeout.Token);
             var output = (await outputTask) + Environment.NewLine + (await errorTask);
             _events.Log("Defender scan finished", $"Windows Defender returned exit code {process.ExitCode}.", process.ExitCode == 0 ? ScanCategory.Safe : ScanCategory.Suspicious);
             return new DefenderScanResult(true, process.ExitCode, executable, output.Trim());
         }
         catch (Exception ex)
         {
+            try { if (running is not null && !running.HasExited) running.Kill(true); } catch { }
             _events.Log("Defender scan failed", ex.Message, ScanCategory.Suspicious);
             return new DefenderScanResult(false, -1, executable, ex.Message);
         }
+        finally { running?.Dispose(); }
     }
 }

@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private LaunchSession? _session;
     private ScanReport _lastReport = new();
     private CancellationTokenSource? _sessionCancellation;
+    private Task? _sessionTask;
     private bool _allowClose;
 
     public MainWindow(
@@ -161,20 +162,20 @@ public partial class MainWindow : Window
             if (decision == PreflightAction.BlockAll) return;
             if (decision == PreflightAction.LaunchSafeMode)
             {
-                var quarantined = _quarantine.Quarantine(_lastReport);
+                var quarantined = _quarantine.Quarantine(_lastReport, ConfirmHeuristicQuarantine(_lastReport));
                 if (quarantined.Count > 0) _events.Log("Malware quarantined", $"Moved {quarantined.Count} malicious file(s) out of mod/Workshop content before safe launch.", ScanCategory.Malware);
                 MessageBox.Show(this, "Threats were found in mod or Workshop content. Normal startup was aborted; PPGAV is relaunching without mods, Steam connectivity, or network access.", "Malware Safe Mode", MessageBoxButton.OK, MessageBoxImage.Warning);
-                await ObserveSessionAsync(_safeMode.Launch(_settings));
+                await StartAndObserveAsync(_safeMode.Launch(_settings));
                 return;
             }
-            var provider = SandboxProviderSelector.Choose(_sandbox.IsAvailable, _sandboxie.IsAvailable);
+            var provider = SandboxProviderSelector.Choose(_settings.UseWindowsSandbox && _sandbox.IsAvailable, _sandboxie.IsAvailable);
             var session = provider switch
             {
                 SandboxProvider.WindowsSandbox => await _sandbox.LaunchAsync(_settings),
                 SandboxProvider.SandboxieClassic => _sandboxie.Launch(_settings),
                 _ => throw new InvalidOperationException("Secure launch requires Windows Sandbox or the free open-source Sandboxie Classic fallback.")
             };
-            await ObserveSessionAsync(session);
+            await StartAndObserveAsync(session);
         }
         catch (Exception ex)
         {
@@ -198,7 +199,7 @@ public partial class MainWindow : Window
             SaveSettingsFromControls();
             if (await RunPreflightAsync() == PreflightAction.BlockAll) return;
             var session = _safeMode.Launch(_settings);
-            await ObserveSessionAsync(session);
+            await StartAndObserveAsync(session);
         }
         catch (Exception ex)
         {
@@ -210,23 +211,40 @@ public partial class MainWindow : Window
     private async Task<PreflightAction> RunPreflightAsync()
     {
         var report = await ScanAsync();
-        foreach (var finding in await Task.Run(() => _integrity.Check(_settings.GameDirectory), _appCancellation.Token)) report.Findings.Add(finding);
+        var integrityFindings = await Task.Run(() => _integrity.Check(_settings.GameDirectory, _settings.PpgExecutablePath), _appCancellation.Token);
+        report.Findings.AddRange(integrityFindings);
         _lastReport = report;
         ApplyReport(report);
         SetStatus("Defender preflight", SuspiciousBrushKey());
         var defender = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
         var defenderClean = defender.Started && defender.ExitCode == 0;
+        var baselineNeedsApproval = _integrity.LastStatus is IntegrityBaselineStatus.Missing or IntegrityBaselineStatus.Corrupt;
+        var nonBaselineCoreFinding = report.Findings.Any(f => f.Scope is ScanScope.GameCore or ScanScope.Unknown && !f.Rule.StartsWith("baseline-", StringComparison.OrdinalIgnoreCase));
+        if (defenderClean && baselineNeedsApproval && !nonBaselineCoreFinding && report.IsComplete)
+        {
+            var answer = MessageBox.Show(this, "PPGAV has no valid approved core baseline for this installation. Trust the currently scanned files as the new baseline? This records an approval and is required before launch.", "Approve core baseline", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (answer == MessageBoxResult.Yes)
+            {
+                await Task.Run(() => _integrity.TrustCurrent(_settings.GameDirectory, _settings.PpgExecutablePath, "Explicit approval in PPGAV dashboard"), _appCancellation.Token);
+                report.Findings.RemoveAll(f => f.Rule.StartsWith("baseline-", StringComparison.OrdinalIgnoreCase));
+                report.Findings.AddRange(await Task.Run(() => _integrity.Check(_settings.GameDirectory, _settings.PpgExecutablePath), _appCancellation.Token));
+                ApplyReport(report);
+            }
+        }
         var decision = PreflightDecisionEngine.Decide(report, defenderClean);
         if (decision == PreflightAction.BlockAll)
         {
             await RespondToMalwareAsync(report);
             return decision;
         }
-        if (defenderClean && !report.HasCoreFinding) await Task.Run(() => _integrity.TrustCurrent(_settings.GameDirectory), _appCancellation.Token);
         return decision;
     }
 
-    private async void ScanNow_Click(object sender, RoutedEventArgs e) => await ScanNow_ClickAsync();
+    private async void ScanNow_Click(object sender, RoutedEventArgs e)
+    {
+        try { await ScanNow_ClickAsync(); }
+        catch (Exception ex) { _events.Log("Inspection failed", ex.Message, ScanCategory.Suspicious); MessageBox.Show(this, ex.Message, "Inspection failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
 
     private async Task ScanNow_ClickAsync()
     {
@@ -251,7 +269,7 @@ public partial class MainWindow : Window
     private async Task RespondToMalwareAsync(ScanReport report)
     {
         SetStatus("Malware blocked", MalwareBrushKey());
-        var quarantined = _quarantine.Quarantine(report);
+        var quarantined = _quarantine.Quarantine(report, ConfirmHeuristicQuarantine(report));
         if (quarantined.Count > 0) _events.Log("Malware quarantined", $"Moved {quarantined.Count} malicious file(s) into the local quarantine store.", ScanCategory.Malware);
         MessageBox.Show(this, "PPGAV found a malware-level signature. The game will not be launched. A Windows Defender full scan is starting now.", "Malware detected", MessageBoxButton.OK, MessageBoxImage.Error);
         if (_session is not null) StopSessionProcess();
@@ -261,20 +279,23 @@ public partial class MainWindow : Window
 
     private async void DefenderScan_Click(object sender, RoutedEventArgs e)
     {
-        SaveSettingsFromControls();
-        SetStatus("Defender scanning", SuspiciousBrushKey());
-        var result = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
-        MessageBox.Show(this, result.Started ? $"Windows Defender finished with exit code {result.ExitCode}." : result.Output, "Windows Defender", MessageBoxButton.OK, result.Started && result.ExitCode == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
-        SetStatus("Protected", SafeBrushKey());
+        try
+        {
+            SaveSettingsFromControls(); SetStatus("Defender scanning", SuspiciousBrushKey());
+            var result = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
+            MessageBox.Show(this, result.Started ? $"Windows Defender finished with exit code {result.ExitCode}." : result.Output, "Windows Defender", MessageBoxButton.OK, result.Started && result.ExitCode == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            SetStatus(result.Started && result.ExitCode == 0 ? "Protected" : "Review needed", result.Started && result.ExitCode == 0 ? SafeBrushKey() : SuspiciousBrushKey());
+        }
+        catch (Exception ex) { _events.Log("Defender scan failed", ex.Message, ScanCategory.Suspicious); MessageBox.Show(this, ex.Message, "Windows Defender", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
     private async void BackupNow_Click(object sender, RoutedEventArgs e) => await BackupNow_ClickAsync();
 
     private async Task BackupNow_ClickAsync()
     {
-        SaveSettingsFromControls();
         try
         {
+            SaveSettingsFromControls();
             SetStatus("Creating backup", AccentBrushKey());
             await _backup.CreateBackupAsync(_settings.GameDirectory, _settings.BackupDirectory, _settings.BackupRetentionCount, _appCancellation.Token);
             RefreshBackups();
@@ -320,9 +341,18 @@ public partial class MainWindow : Window
     private void StopSessionProcess()
     {
         if (_session is null) return;
-        if (_session.Mode == LaunchMode.SecureSandbox) WindowsSandboxService.Stop(_session);
+        if (_session.Provider == SandboxProvider.WindowsSandbox) WindowsSandboxService.Stop(_session);
+        else if (_session.Provider == SandboxProvider.SandboxieClassic) _sandboxie.Stop(_session);
         else ProcessTree.KillTree(_session.Process);
         _events.Log("Game stopped", "The active People Playground session was force-closed by PPGAV.", ScanCategory.Suspicious);
+    }
+
+    private async Task StartAndObserveAsync(LaunchSession session)
+    {
+        var task = ObserveSessionAsync(session);
+        _sessionTask = task;
+        try { await task; }
+        finally { if (ReferenceEquals(_sessionTask, task)) _sessionTask = null; }
     }
 
     private async Task ObserveSessionAsync(LaunchSession session)
@@ -341,8 +371,9 @@ public partial class MainWindow : Window
         finally
         {
             _sessionCancellation.Cancel();
-            try { await monitorTask; } catch (OperationCanceledException) { }
-            await session.DisposeAsync();
+            try { await monitorTask; } catch (OperationCanceledException) { } catch (Exception ex) { _events.Log("Behavior monitor failed", ex.Message, ScanCategory.Suspicious); }
+            try { await session.DisposeAsync(); }
+            catch (Exception ex) { _events.Log("Session cleanup failed", ex.Message, ScanCategory.Suspicious); }
             _sessionCancellation.Dispose();
             _sessionCancellation = null;
             _session = null;
@@ -353,6 +384,9 @@ public partial class MainWindow : Window
 
     private async Task HandleBehaviorAlertAsync(BehaviorAlert alert, LaunchSession session)
     {
+        if (!ReferenceEquals(_session, session)) return;
+        try
+        {
         await Dispatcher.InvokeAsync(() =>
         {
             SetStatus(alert.Category == ScanCategory.Malware ? "Malware blocked" : "Review needed", alert.Category == ScanCategory.Malware ? MalwareBrushKey() : SuspiciousBrushKey());
@@ -362,6 +396,14 @@ public partial class MainWindow : Window
         {
             await _defender.RunFullScanAsync(null, _appCancellation.Token);
         }
+        }
+        catch (Exception ex) { _events.Log("Behavior response failed", ex.Message, ScanCategory.Suspicious); if (ReferenceEquals(_session, session)) StopSessionProcess(); }
+    }
+
+    private bool ConfirmHeuristicQuarantine(ScanReport report)
+    {
+        if (!report.Findings.Any(f => f.Category == ScanCategory.Malware && f.Detection == DetectionKind.Heuristic)) return false;
+        return MessageBox.Show(this, "Some malware-level findings are heuristic rather than confirmed. Move those mod/Workshop files into PPGAV quarantine?", "Confirm heuristic quarantine", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
     }
 
     private void ApplyReport(ScanReport report)
@@ -502,11 +544,19 @@ public partial class MainWindow : Window
         _trayIcon.ShowBalloonTip(1500, "PPGAV is still protecting you", "The antivirus guard remains active in the system tray.", Forms.ToolTipIcon.Info);
     }
 
-    private void ExitApplication()
+    private async void ExitApplication()
     {
         _allowClose = true;
         _appCancellation.Cancel();
-        if (_session is not null) StopSessionProcess();
+        if (_session is not null)
+        {
+            StopSessionProcess();
+            var sessionTask = _sessionTask;
+            if (sessionTask is not null)
+            {
+                try { await sessionTask; } catch (Exception ex) { _events.Log("Shutdown cleanup failed", ex.Message, ScanCategory.Suspicious); }
+            }
+        }
         System.Windows.Application.Current.Shutdown();
     }
 

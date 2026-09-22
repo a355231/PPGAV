@@ -34,6 +34,7 @@ public partial class App : WpfApplication
         var sandboxie = new SandboxieService(events);
         var safeMode = new SafeModeLauncher(firewall, events);
         safeMode.RecoverStaleDisabledMods(settings.GameDirectory);
+        sandbox.CleanupAbandonedSessions();
         var monitor = new BehaviorMonitor(events, scanner);
 
         _mainWindow = new MainWindow(settingsService, settings, events, startup, scanner, integrity, quarantine, updates, backup, defender, sandbox, sandboxie, safeMode, monitor)

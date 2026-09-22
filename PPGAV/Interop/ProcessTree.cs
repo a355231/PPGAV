@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace PPGAV.Interop;
 
-public sealed record ProcessSnapshot(int ProcessId, int ParentProcessId, string Name, string? Path);
+public sealed record ProcessSnapshot(int ProcessId, int ParentProcessId, string Name, string? Path, DateTime? StartTimeUtc);
 
 public static class ProcessTree
 {
@@ -48,9 +48,9 @@ public static class ProcessTree
             if (!Process32First(handle, ref entry)) return result;
             do
             {
-                string? path = null;
-                try { path = Process.GetProcessById((int)entry.ProcessId).MainModule?.FileName; } catch { }
-                result.Add(new ProcessSnapshot((int)entry.ProcessId, (int)entry.ParentProcessId, entry.ExeFile, path));
+                string? path = null; DateTime? start = null;
+                try { using var inspected = Process.GetProcessById((int)entry.ProcessId); path = inspected.MainModule?.FileName; start = inspected.StartTime.ToUniversalTime(); } catch { }
+                result.Add(new ProcessSnapshot((int)entry.ProcessId, (int)entry.ParentProcessId, entry.ExeFile, path, start));
             }
             while (Process32Next(handle, ref entry));
         }
@@ -86,11 +86,30 @@ public static class ProcessTree
 
     public static void KillTree(Process root)
     {
-        foreach (var child in Descendants(root.Id).OrderByDescending(p => p.ParentProcessId))
+        if (!IsCurrentIdentity(root)) return;
+        var snapshots = Descendants(root.Id);
+        foreach (var child in snapshots.OrderByDescending(p => p.ParentProcessId))
         {
-            try { Process.GetProcessById(child.ProcessId).Kill(true); } catch { }
+            try
+            {
+                using var process = Process.GetProcessById(child.ProcessId);
+                if (child.StartTimeUtc is null || process.StartTime.ToUniversalTime() != child.StartTimeUtc.Value) continue;
+                if (child.Path is not null && !string.Equals(process.MainModule?.FileName, child.Path, StringComparison.OrdinalIgnoreCase)) continue;
+                process.Kill(true);
+            }
+            catch { }
         }
 
-        try { if (!root.HasExited) root.Kill(true); } catch { }
+        try { if (IsCurrentIdentity(root) && !root.HasExited) root.Kill(true); } catch { }
+    }
+
+    private static bool IsCurrentIdentity(Process expected)
+    {
+        try
+        {
+            using var current = Process.GetProcessById(expected.Id);
+            return current.StartTime.ToUniversalTime() == expected.StartTime.ToUniversalTime() && string.Equals(current.MainModule?.FileName, expected.MainModule?.FileName, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 }

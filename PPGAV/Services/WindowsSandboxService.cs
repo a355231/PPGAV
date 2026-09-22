@@ -1,5 +1,5 @@
-using System.Security;
-using System.Security.Principal;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Xml.Linq;
 using PPGAV.Models;
 
@@ -8,159 +8,133 @@ namespace PPGAV.Services;
 public sealed class WindowsSandboxService
 {
     private readonly EventLogService _events;
-
-    public WindowsSandboxService(EventLogService events)
-    {
-        _events = events;
-    }
-
+    private sealed record StageManifest(string Owner, string SessionId, Dictionary<string, string> Files);
+    public WindowsSandboxService(EventLogService events) => _events = events;
     public bool IsAvailable => File.Exists(Path.Combine(Environment.SystemDirectory, "WindowsSandbox.exe"));
+
+    public void CleanupAbandonedSessions()
+    {
+        var sessions = Path.Combine(AppPaths.SandboxFolder, "Sessions");
+        if (!Directory.Exists(sessions)) return;
+        foreach (var directory in Directory.EnumerateDirectories(sessions))
+        {
+            var marker = Path.Combine(directory, ".ppgav-staging.json");
+            try
+            {
+                SecurePathService.RequireContained(sessions, directory, true, "sandbox session");
+                var manifest = File.Exists(marker) ? JsonSerializer.Deserialize<StageManifest>(File.ReadAllText(marker)) : null;
+                if (manifest?.Owner != "PPGAV" || !Guid.TryParse(manifest.SessionId, out _)) continue;
+                Directory.Delete(directory, true);
+                _events.Log("Abandoned sandbox staging removed", $"Removed verified PPGAV session {manifest.SessionId}.");
+            }
+            catch (Exception ex) { _events.Log("Sandbox cleanup needed", $"Could not remove abandoned session {directory}: {ex.Message}", ScanCategory.Suspicious); }
+        }
+    }
 
     public async Task<LaunchSession> LaunchAsync(AppSettings settings, CancellationToken cancellationToken = default)
     {
-        if (!IsAvailable)
-        {
-            throw new InvalidOperationException("Windows Sandbox is not available. Enable the Windows Sandbox optional feature or use Malware Safe Mode.");
-        }
-
-        var executable = RequireExecutable(settings);
-        var gameRoot = Path.GetFullPath(settings.GameDirectory);
-        if (!IsWithin(gameRoot, executable))
-        {
-            throw new InvalidOperationException("The game executable must be inside the configured game directory for disposable sandbox staging.");
-        }
-
-        Directory.CreateDirectory(AppPaths.SandboxFolder);
-        var sessionRoot = Path.Combine(AppPaths.SandboxFolder, "Sessions", Guid.NewGuid().ToString("N"));
+        if (!IsAvailable) throw new InvalidOperationException("Windows Sandbox is not available.");
+        var executable = SecurePathService.RequireExistingFile(settings.PpgExecutablePath, "People Playground executable");
+        var gameRoot = SecurePathService.RequireExistingDirectory(settings.GameDirectory, "People Playground directory");
+        SecurePathService.RequireContained(gameRoot, executable, true, "People Playground executable");
+        var sessionId = Guid.NewGuid().ToString("N");
+        var sessions = Path.Combine(AppPaths.SandboxFolder, "Sessions"); Directory.CreateDirectory(sessions);
+        var sessionRoot = Path.Combine(sessions, sessionId); Directory.CreateDirectory(sessionRoot);
+        var markerPath = Path.Combine(sessionRoot, ".ppgav-staging.json");
         var stagedGameRoot = Path.Combine(sessionRoot, "Game");
-        CopyDirectory(gameRoot, stagedGameRoot);
-        var stagedExecutable = Path.Combine(stagedGameRoot, Path.GetRelativePath(gameRoot, executable));
-        if (!File.Exists(stagedExecutable))
+        try
         {
-            TryDeleteDirectory(sessionRoot);
-            throw new InvalidOperationException("The game could not be copied into the disposable Windows Sandbox staging area.");
+            cancellationToken.ThrowIfCancellationRequested();
+            var totalBytes = EnumerateSafeFiles(gameRoot).Sum(x => new FileInfo(x).Length);
+            var drive = new DriveInfo(Path.GetPathRoot(sessionRoot)!);
+            if (drive.AvailableFreeSpace < totalBytes * 2 + 256L * 1024 * 1024) throw new IOException("Insufficient free space for a disposable Windows Sandbox staging copy.");
+            var manifest = new StageManifest("PPGAV", sessionId, new()); WriteMarker(markerPath, manifest);
+            await CopyDirectoryAsync(gameRoot, stagedGameRoot, gameRoot, manifest, markerPath, cancellationToken);
+            VerifyStagedHashes(stagedGameRoot, manifest.Files);
+            var stagedExecutable = Path.Combine(stagedGameRoot, Path.GetRelativePath(gameRoot, executable));
+            SecurePathService.RequireExistingFile(stagedExecutable, "staged executable");
+            var configPath = Path.Combine(sessionRoot, "PPGAV.wsb");
+            BuildConfiguration(stagedGameRoot, stagedExecutable).Save(configPath);
+            var process = Process.Start(new ProcessStartInfo { FileName = Path.Combine(Environment.SystemDirectory, "WindowsSandbox.exe"), UseShellExecute = true, WorkingDirectory = sessionRoot, ArgumentList = { configPath } }) ?? throw new InvalidOperationException("Windows Sandbox could not be started.");
+            _events.Log("Secure sandbox started", "Windows Sandbox is running from a verified disposable writable copy; the real game directory is not mapped.");
+            return new LaunchSession(LaunchMode.SecureSandbox, process, async () =>
+            {
+                PersistApprovedSaveFiles(settings, stagedGameRoot, gameRoot);
+                DeleteOwnedSession(sessionRoot, markerPath);
+                await ValueTask.CompletedTask;
+            }, configPath, SandboxProvider.WindowsSandbox);
         }
-        var configPath = Path.Combine(sessionRoot, "PPGAV.wsb");
-        var config = BuildConfiguration(stagedGameRoot, stagedExecutable);
-        config.Save(configPath);
-        
-        /*
-         * The real game directory is never mapped into the sandbox. A disposable
-         * writable copy provides normal in-session saves/configuration while keeping
-         * malware writes away from the real installation.
-         */
-        
-        /*
-         * Keep the generated profile on disk only for the lifetime of the session.
-         */
-
-        var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = Path.Combine(Environment.SystemDirectory, "WindowsSandbox.exe"),
-            Arguments = $"\"{configPath}\"",
-            UseShellExecute = true,
-            WorkingDirectory = AppPaths.SandboxFolder
-        });
-        if (process is null)
-        {
-            TryDelete(configPath);
-            TryDeleteDirectory(sessionRoot);
-            throw new InvalidOperationException("Windows Sandbox could not be started.");
-        }
-
-        _events.Log("Secure sandbox started", "People Playground is running from a disposable writable game copy; networking, clipboard, and vGPU are disabled.");
-        await Task.CompletedTask;
-        return new LaunchSession(LaunchMode.SecureSandbox, process, async () =>
-        {
-            PersistSafeData(stagedGameRoot, gameRoot);
-            TryDelete(configPath);
-            TryDeleteDirectory(sessionRoot);
-            await Task.CompletedTask;
-        }, configPath);
+        catch { TryDeleteOwnedSession(sessionRoot, markerPath); throw; }
     }
 
     public XDocument BuildConfiguration(string gameRoot, string executable)
     {
         var mappedExecutable = "C:\\PPGAVGame\\" + Path.GetRelativePath(gameRoot, executable).Replace('/', '\\');
-        return new XDocument(
-            new XElement("Configuration",
-                new XElement("MappedFolders",
-                new XElement("MappedFolder",
-                        new XElement("HostFolder", gameRoot),
-                        new XElement("SandboxFolder", "C:\\PPGAVGame"),
-                        new XElement("ReadOnly", "false"))),
-                new XElement("Networking", "Disable"),
-                new XElement("ClipboardRedirection", "Disable"),
-                new XElement("vGPU", "Disable"),
-                new XElement("MemoryInMB", "4096"),
-                new XElement("LogonCommand",
-                    new XElement("Command", $"cmd.exe /c \"\"{mappedExecutable}\"\""))));
+        return new XDocument(new XElement("Configuration", new XElement("MappedFolders", new XElement("MappedFolder", new XElement("HostFolder", gameRoot), new XElement("SandboxFolder", "C:\\PPGAVGame"), new XElement("ReadOnly", "false"))), new XElement("Networking", "Disable"), new XElement("ClipboardRedirection", "Disable"), new XElement("vGPU", "Disable"), new XElement("MemoryInMB", "4096"), new XElement("LogonCommand", new XElement("Command", mappedExecutable))));
     }
 
-    public static void Stop(LaunchSession session)
-    {
-        try
-        {
-            if (!session.Process.HasExited) session.Process.Kill(true);
-        }
-        catch { }
-    }
+    public static void Stop(LaunchSession session) { try { if (!session.Process.HasExited) session.Process.Kill(true); } catch { } }
 
-    private static string RequireExecutable(AppSettings settings)
-    {
-        if (string.IsNullOrWhiteSpace(settings.PpgExecutablePath) || !File.Exists(settings.PpgExecutablePath))
-        {
-            throw new FileNotFoundException("People Playground.exe was not found.", settings.PpgExecutablePath);
-        }
-
-        return Path.GetFullPath(settings.PpgExecutablePath);
-    }
-
-    private static bool IsWithin(string root, string candidate)
-    {
-        var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
-    }
-
-    private static void TryDeleteDirectory(string path)
-    {
-        try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch { }
-    }
-
-    private static void CopyDirectory(string source, string destination)
+    private static async Task CopyDirectoryAsync(string source, string destination, string sourceRoot, StageManifest manifest, string markerPath, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(destination);
         foreach (var file in Directory.EnumerateFiles(source))
         {
-            try { File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true); } catch { }
+            cancellationToken.ThrowIfCancellationRequested();
+            SecurePathService.RejectReparse(file, "source file");
+            var target = Path.Combine(destination, Path.GetFileName(file));
+            await using (var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 64, useAsync: true))
+            await using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 64, useAsync: true)) await input.CopyToAsync(output, cancellationToken);
+            await using var stagedInput = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+            manifest.Files[Path.GetRelativePath(sourceRoot, file)] = Convert.ToHexString(await SHA256.HashDataAsync(stagedInput, cancellationToken));
+            WriteMarker(markerPath, manifest);
         }
         foreach (var directory in Directory.EnumerateDirectories(source))
         {
-            if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)) continue;
-            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+            cancellationToken.ThrowIfCancellationRequested(); SecurePathService.RejectReparse(directory, "source directory");
+            await CopyDirectoryAsync(directory, Path.Combine(destination, Path.GetFileName(directory)), sourceRoot, manifest, markerPath, cancellationToken);
         }
     }
 
-    private static void PersistSafeData(string stagedRoot, string realRoot)
+    private static void VerifyStagedHashes(string root, IReadOnlyDictionary<string, string> hashes)
     {
-        var safeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".json", ".sav", ".dat", ".cfg", ".ini" };
-        try
+        foreach (var item in hashes)
         {
-            foreach (var file in Directory.EnumerateFiles(stagedRoot, "*", SearchOption.AllDirectories))
-            {
-                if (new FileInfo(file).Length > 16 * 1024 * 1024 || !safeExtensions.Contains(Path.GetExtension(file))) continue;
-                var relative = Path.GetRelativePath(stagedRoot, file);
-                if (relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(x => x.Equals("Mods", StringComparison.OrdinalIgnoreCase) || x.Equals("Workshop", StringComparison.OrdinalIgnoreCase))) continue;
-                var destination = Path.Combine(realRoot, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Copy(file, destination, true);
-            }
+            var path = SecurePathService.RequireContained(root, Path.Combine(root, item.Key), true, "staged file");
+            using var stream = File.OpenRead(path); var actual = Convert.ToHexString(SHA256.HashData(stream));
+            if (!actual.Equals(item.Value, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Staged hash changed before launch: {item.Key}");
         }
-        catch { }
     }
+
+    private void PersistApprovedSaveFiles(AppSettings settings, string stagedRoot, string realRoot)
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".json", ".sav", ".dat", ".cfg", ".ini" };
+        foreach (var configured in settings.SandboxSavePaths ?? [])
+        {
+            var staged = SecurePathService.RequireContained(stagedRoot, Path.Combine(stagedRoot, configured), true, "approved sandbox save");
+            if (!allowed.Contains(Path.GetExtension(staged))) throw new InvalidOperationException($"Configured sandbox save is not an approved save extension: {configured}");
+            var destination = SecurePathService.RequireContained(realRoot, Path.Combine(realRoot, configured), false, "sandbox save destination");
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!); SecurePathService.RejectReparse(Path.GetDirectoryName(destination)!, "sandbox save destination"); File.Copy(staged, destination, true);
+            _events.Log("Sandbox save persisted", $"Persisted explicitly approved save file {configured}.");
+        }
+    }
+
+    private static void WriteMarker(string path, StageManifest manifest)
+    {
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try { File.WriteAllText(temporary, JsonSerializer.Serialize(manifest)); File.Move(temporary, path, true); } finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+    private static bool IsReparse(string path) { try { return File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint); } catch { return true; } }
+    private static IEnumerable<string> EnumerateSafeFiles(string root)
+    {
+        var pending = new Stack<string>([root]);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop(); SecurePathService.RejectReparse(directory, "sandbox source directory");
+            foreach (var file in Directory.GetFiles(directory)) { SecurePathService.RejectReparse(file, "sandbox source file"); yield return file; }
+            foreach (var child in Directory.GetDirectories(directory)) { SecurePathService.RejectReparse(child, "sandbox source directory"); pending.Push(child); }
+        }
+    }
+    private static void DeleteOwnedSession(string sessionRoot, string marker) { SecurePathService.RequireExistingFile(marker, "sandbox ownership marker"); Directory.Delete(sessionRoot, true); }
+    private static void TryDeleteOwnedSession(string sessionRoot, string marker) { try { if (File.Exists(marker)) DeleteOwnedSession(sessionRoot, marker); } catch { } }
 }
