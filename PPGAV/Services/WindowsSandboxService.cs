@@ -27,17 +27,27 @@ public sealed class WindowsSandboxService
         var gameRoot = Path.GetFullPath(settings.GameDirectory);
         if (!IsWithin(gameRoot, executable))
         {
-            throw new InvalidOperationException("The game executable must be inside the configured game directory for read-only sandbox mapping.");
+            throw new InvalidOperationException("The game executable must be inside the configured game directory for disposable sandbox staging.");
         }
 
         Directory.CreateDirectory(AppPaths.SandboxFolder);
-        var configPath = Path.Combine(AppPaths.SandboxFolder, $"ppgav-{Guid.NewGuid():N}.wsb");
-        var config = BuildConfiguration(gameRoot, executable);
+        var sessionRoot = Path.Combine(AppPaths.SandboxFolder, "Sessions", Guid.NewGuid().ToString("N"));
+        var stagedGameRoot = Path.Combine(sessionRoot, "Game");
+        CopyDirectory(gameRoot, stagedGameRoot);
+        var stagedExecutable = Path.Combine(stagedGameRoot, Path.GetRelativePath(gameRoot, executable));
+        if (!File.Exists(stagedExecutable))
+        {
+            TryDeleteDirectory(sessionRoot);
+            throw new InvalidOperationException("The game could not be copied into the disposable Windows Sandbox staging area.");
+        }
+        var configPath = Path.Combine(sessionRoot, "PPGAV.wsb");
+        var config = BuildConfiguration(stagedGameRoot, stagedExecutable);
         config.Save(configPath);
         
         /*
-         * The sandbox profile deliberately maps the host game directory read-only.
-         * PPGAV data and backups remain outside that mapping.
+         * The real game directory is never mapped into the sandbox. A disposable
+         * writable copy provides normal in-session saves/configuration while keeping
+         * malware writes away from the real installation.
          */
         
         /*
@@ -54,14 +64,17 @@ public sealed class WindowsSandboxService
         if (process is null)
         {
             TryDelete(configPath);
+            TryDeleteDirectory(sessionRoot);
             throw new InvalidOperationException("Windows Sandbox could not be started.");
         }
 
-        _events.Log("Secure sandbox started", "People Playground is running with a read-only game mapping and disabled networking.");
+        _events.Log("Secure sandbox started", "People Playground is running from a disposable writable game copy; networking, clipboard, and vGPU are disabled.");
         await Task.CompletedTask;
         return new LaunchSession(LaunchMode.SecureSandbox, process, async () =>
         {
+            PersistSafeData(stagedGameRoot, gameRoot);
             TryDelete(configPath);
+            TryDeleteDirectory(sessionRoot);
             await Task.CompletedTask;
         }, configPath);
     }
@@ -72,10 +85,10 @@ public sealed class WindowsSandboxService
         return new XDocument(
             new XElement("Configuration",
                 new XElement("MappedFolders",
-                    new XElement("MappedFolder",
+                new XElement("MappedFolder",
                         new XElement("HostFolder", gameRoot),
                         new XElement("SandboxFolder", "C:\\PPGAVGame"),
-                        new XElement("ReadOnly", "true"))),
+                        new XElement("ReadOnly", "false"))),
                 new XElement("Networking", "Disable"),
                 new XElement("ClipboardRedirection", "Disable"),
                 new XElement("vGPU", "Disable"),
@@ -112,5 +125,42 @@ public sealed class WindowsSandboxService
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch { }
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.EnumerateFiles(source))
+        {
+            try { File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true); } catch { }
+        }
+        foreach (var directory in Directory.EnumerateDirectories(source))
+        {
+            if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)) continue;
+            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
+    }
+
+    private static void PersistSafeData(string stagedRoot, string realRoot)
+    {
+        var safeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".json", ".sav", ".dat", ".cfg", ".ini" };
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(stagedRoot, "*", SearchOption.AllDirectories))
+            {
+                if (new FileInfo(file).Length > 16 * 1024 * 1024 || !safeExtensions.Contains(Path.GetExtension(file))) continue;
+                var relative = Path.GetRelativePath(stagedRoot, file);
+                if (relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(x => x.Equals("Mods", StringComparison.OrdinalIgnoreCase) || x.Equals("Workshop", StringComparison.OrdinalIgnoreCase))) continue;
+                var destination = Path.Combine(realRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination, true);
+            }
+        }
+        catch { }
     }
 }

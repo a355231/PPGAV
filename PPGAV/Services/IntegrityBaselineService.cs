@@ -9,7 +9,7 @@ public sealed class IntegrityBaselineService
     private readonly string _baselinePath;
     public IntegrityBaselineService(string? baselinePath = null) => _baselinePath = baselinePath ?? Path.Combine(AppPaths.Root, "core-integrity.json");
 
-    public List<ScanFinding> CheckAndUpdate(string gameRoot)
+    public List<ScanFinding> Check(string gameRoot)
     {
         var current = EnumerateCore(gameRoot).ToDictionary(x => x.Path, x => x.Hash, StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string>? previous = null;
@@ -22,9 +22,21 @@ public sealed class IntegrityBaselineService
             foreach (var missing in previous.Keys.Except(current.Keys, StringComparer.OrdinalIgnoreCase))
                 findings.Add(new(ScanCategory.Suspicious, missing, "trusted-file-missing", "A core game file from the trusted baseline is missing.", string.Empty, ScanScope.GameCore, 60));
         }
+        return findings;
+    }
+
+    public List<ScanFinding> CheckAndUpdate(string gameRoot)
+    {
+        var findings = Check(gameRoot);
+        if (findings.Count == 0) TrustCurrent(gameRoot);
+        return findings;
+    }
+
+    public void TrustCurrent(string gameRoot)
+    {
+        var current = EnumerateCore(gameRoot).ToDictionary(x => x.Path, x => x.Hash, StringComparer.OrdinalIgnoreCase);
         Directory.CreateDirectory(Path.GetDirectoryName(_baselinePath)!);
         File.WriteAllText(_baselinePath, JsonSerializer.Serialize(current, new JsonSerializerOptions { WriteIndented = true }));
-        return findings;
     }
 
     private static IEnumerable<(string Path, string Hash)> EnumerateCore(string root)

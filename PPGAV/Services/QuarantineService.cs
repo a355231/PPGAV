@@ -12,7 +12,7 @@ public sealed class QuarantineService
     public IReadOnlyList<QuarantineItem> Quarantine(ScanReport report)
     {
         var moved = new List<QuarantineItem>();
-        foreach (var file in report.Findings.Where(x => x.Category == ScanCategory.Malware).Select(x => x.FilePath).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var file in report.Findings.Where(x => x.Category == ScanCategory.Malware && (x.Scope is ScanScope.LocalMods or ScanScope.SteamWorkshop or ScanScope.Archive)).Select(x => x.FilePath).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!File.Exists(file)) continue;
             var destination = Path.Combine(_root, DateTime.UtcNow.ToString("yyyyMMdd"), Guid.NewGuid().ToString("N") + "-" + Path.GetFileName(file));

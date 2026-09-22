@@ -21,6 +21,8 @@ static class SmokeTests
             TestSandboxProviderSelection();
             TestIntegrityBaselineDetectsChangedCore(root);
             TestQuarantineMovesOnlySelectedFiles(root);
+            TestQuarantineLeavesCoreFilesInPlace(root);
+            TestBinaryModIsFlagged(root);
             TestNetworkEndpointParser();
             await TestBackupRoundTrip(root);
             TestBackupRejectsTraversal(root);
@@ -117,6 +119,8 @@ static class SmokeTests
         Assert(service.CheckAndUpdate(game).Count == 0, "initial integrity baseline was not created cleanly");
         File.WriteAllText(file, "changed-fixture");
         Assert(service.CheckAndUpdate(game).Any(f => f.Rule == "trusted-file-changed"), "changed core file was not detected");
+        File.WriteAllText(file, "changed-again");
+        Assert(service.CheckAndUpdate(game).Any(f => f.Rule == "trusted-file-changed"), "changed baseline was incorrectly replaced");
         _passed++;
     }
 
@@ -141,6 +145,25 @@ static class SmokeTests
         var lines = new[] { "TCP    127.0.0.1:1234    8.8.8.8:443    ESTABLISHED    456", "UDP    0.0.0.0:5353    *:*    456" };
         var endpoints = NetworkActivityMonitor.ParseNetstat(lines);
         Assert(endpoints.Count == 2 && endpoints.All(x => x.ProcessId == 456), "network endpoint parser missed process ownership");
+        _passed++;
+    }
+
+    private static void TestQuarantineLeavesCoreFilesInPlace(string root)
+    {
+        var core = Path.Combine(root, "core.exe"); File.WriteAllText(core, "core");
+        var report = new ScanReport();
+        report.Findings.Add(new ScanFinding(ScanCategory.Malware, core, "test", "core", "hash", ScanScope.GameCore, 100));
+        Assert(new QuarantineService(Path.Combine(root, "core-quarantine")).Quarantine(report).Count == 0 && File.Exists(core), "core game file was quarantined");
+        _passed++;
+    }
+
+    private static void TestBinaryModIsFlagged(string root)
+    {
+        var mods = Path.Combine(root, "binary-mod", "Mods"); Directory.CreateDirectory(mods);
+        var bytes = new byte[1024]; bytes[0] = (byte)'M'; bytes[1] = (byte)'Z'; BitConverter.GetBytes(512).CopyTo(bytes, 0x3C); bytes[512] = (byte)'P'; bytes[513] = (byte)'E';
+        File.WriteAllBytes(Path.Combine(mods, "native.dll"), bytes);
+        var report = new ScannerService().Scan(Path.Combine(root, "binary-mod"));
+        Assert(report.Findings.Any(f => f.Rule == "untrusted-portable-executable"), "untrusted PE mod was not flagged");
         _passed++;
     }
 
@@ -221,7 +244,7 @@ static class SmokeTests
         Assert(xml.Root?.Element("Networking")?.Value == "Disable", "sandbox networking is not disabled");
         Assert(xml.Root?.Element("ClipboardRedirection")?.Value == "Disable", "sandbox clipboard is not disabled");
         Assert(xml.Root?.Element("vGPU")?.Value == "Disable", "sandbox vGPU is not disabled");
-        Assert(xml.Descendants("ReadOnly").Single().Value == "true", "game mapping is not read-only");
+        Assert(xml.Descendants("ReadOnly").Single().Value == "false", "sandbox staging copy is not writable for normal save/config behavior");
         _passed++;
     }
 

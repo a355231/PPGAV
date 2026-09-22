@@ -204,17 +204,19 @@ public partial class MainWindow : Window
     private async Task<PreflightAction> RunPreflightAsync()
     {
         var report = await ScanAsync();
-        foreach (var finding in await Task.Run(() => _integrity.CheckAndUpdate(_settings.GameDirectory), _appCancellation.Token)) report.Findings.Add(finding);
+        foreach (var finding in await Task.Run(() => _integrity.Check(_settings.GameDirectory), _appCancellation.Token)) report.Findings.Add(finding);
         _lastReport = report;
         ApplyReport(report);
         SetStatus("Defender preflight", SuspiciousBrushKey());
         var defender = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
-        var decision = PreflightDecisionEngine.Decide(report, defender.Started && defender.ExitCode == 0);
+        var defenderClean = defender.Started && defender.ExitCode == 0;
+        var decision = PreflightDecisionEngine.Decide(report, defenderClean);
         if (decision == PreflightAction.BlockAll)
         {
             await RespondToMalwareAsync(report);
             return decision;
         }
+        if (defenderClean && !report.HasCoreFinding) await Task.Run(() => _integrity.TrustCurrent(_settings.GameDirectory), _appCancellation.Token);
         return decision;
     }
 

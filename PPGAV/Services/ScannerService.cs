@@ -80,7 +80,14 @@ public sealed class ScannerService
         {
             var length = new FileInfo(file).Length;
             if (TextExtensions.Contains(ext) && length <= 8 * 1024 * 1024) content = File.ReadAllText(file, Encoding.UTF8);
-            else if (scope is ScanScope.LocalMods or ScanScope.SteamWorkshop && (ext.Equals(".dll", StringComparison.OrdinalIgnoreCase) || ext.Equals(".exe", StringComparison.OrdinalIgnoreCase)) && length <= 32 * 1024 * 1024) content = ExtractStrings(File.ReadAllBytes(file));
+            else if (scope is ScanScope.LocalMods or ScanScope.SteamWorkshop && (ext.Equals(".dll", StringComparison.OrdinalIgnoreCase) || ext.Equals(".exe", StringComparison.OrdinalIgnoreCase)) && length <= 32 * 1024 * 1024)
+            {
+                var bytes = File.ReadAllBytes(file);
+                if (AmsiScanner.IsMalware(bytes, file)) Add(report, ScanCategory.Malware, file, "windows-amsi-binary", "AMSI classified an untrusted binary as malware.", hash, scope, 100);
+                if (IsPortableExecutable(bytes)) Add(report, ScanCategory.Suspicious, file, "untrusted-portable-executable", "An untrusted mod contains a Windows PE binary; its imports and entropy are inspected.", hash, scope, 45);
+                if (ShannonEntropy(bytes) >= 7.2) Add(report, ScanCategory.Suspicious, file, "high-entropy-binary", "The untrusted binary has high entropy consistent with packing or obfuscation.", hash, scope, 45);
+                content = ExtractStrings(bytes);
+            }
         }
         catch { report.Errors.Add($"Could not inspect {file}."); }
         if (string.IsNullOrEmpty(content)) return;
@@ -121,6 +128,13 @@ public sealed class ScannerService
         return ScanScope.GameCore;
     }
     private static string ExtractStrings(byte[] bytes) => Encoding.UTF8.GetString(bytes.Select(b => b is >= 32 and <= 126 ? b : (byte)' ').ToArray());
+    private static bool IsPortableExecutable(byte[] bytes) => bytes.Length > 0x40 && bytes[0] == (byte)'M' && bytes[1] == (byte)'Z' && BitConverter.ToInt32(bytes, 0x3C) > 0 && BitConverter.ToInt32(bytes, 0x3C) < bytes.Length - 4 && bytes[BitConverter.ToInt32(bytes, 0x3C)] == (byte)'P' && bytes[BitConverter.ToInt32(bytes, 0x3C) + 1] == (byte)'E';
+    private static double ShannonEntropy(byte[] bytes)
+    {
+        if (bytes.Length == 0) return 0;
+        var counts = new int[256]; foreach (var value in bytes) counts[value]++;
+        return counts.Where(x => x > 0).Sum(x => { var p = (double)x / bytes.Length; return -p * Math.Log2(p); });
+    }
     private static Regex Rx(string pattern) => new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static void Add(ScanReport r, ScanCategory c, string f, string rule, string d, string h, ScanScope s, int score) => r.Findings.Add(new(c, f, rule, d, h, s, score));
     private static string Hash(string file) { try { using var stream = File.OpenRead(file); return Convert.ToHexString(SHA256.HashData(stream)); } catch { return string.Empty; } }

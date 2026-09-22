@@ -44,7 +44,12 @@ public sealed class BehaviorMonitor
                 foreach (var endpoint in NetworkActivityMonitor.Snapshot().Where(x => x.ProcessId == session.Process.Id || reportedProcessIds.Contains(x.ProcessId)))
                 {
                     var key = $"{endpoint.Protocol}|{endpoint.Local}|{endpoint.Remote}|{endpoint.ProcessId}";
-                    if (knownEndpoints.Add(key)) Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Game network activity", $"PPG process opened {endpoint.Protocol} {endpoint.Remote}.", false));
+                    if (knownEndpoints.Add(key))
+                    {
+                        var external = IsExternalEndpoint(endpoint.Remote);
+                        Alert(onAlert, new BehaviorAlert(external ? ScanCategory.Malware : ScanCategory.Suspicious, external ? "External network activity blocked" : "Local network activity", $"PPG process opened {endpoint.Protocol} {endpoint.Remote}.", external));
+                        if (external) { ProcessTree.KillTree(session.Process); return; }
+                    }
                 }
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
             }
@@ -79,5 +84,11 @@ public sealed class BehaviorMonitor
         if (parts.Any(x => x.Equals("Mods", StringComparison.OrdinalIgnoreCase))) return ScanScope.LocalMods;
         if (parts.Any(x => x.Equals("Workshop", StringComparison.OrdinalIgnoreCase))) return ScanScope.SteamWorkshop;
         return ScanScope.GameCore;
+    }
+
+    private static bool IsExternalEndpoint(string remote)
+    {
+        var value = remote.Split(':')[0];
+        return value is not ("*" or "0.0.0.0" or "127.0.0.1" or "::1" or "[::1]") && !value.StartsWith("127.", StringComparison.OrdinalIgnoreCase);
     }
 }
