@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO;
 using PPGAV.Interop;
 using PPGAV.Models;
 
@@ -11,69 +10,74 @@ public sealed class BehaviorMonitor
     {
         "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe", "bitsadmin.exe", "certutil.exe"
     };
-
     private readonly EventLogService _events;
+    private readonly ScannerService _scanner;
 
-    public BehaviorMonitor(EventLogService events)
+    public BehaviorMonitor(EventLogService events, ScannerService scanner)
     {
         _events = events;
+        _scanner = scanner;
     }
 
-    public async Task MonitorAsync(LaunchSession session, string gameDirectory, Action<BehaviorAlert> onAlert, CancellationToken cancellationToken)
+    public async Task MonitorAsync(LaunchSession session, string gameDirectory, Action<BehaviorAlert> onAlert, CancellationToken cancellationToken, IEnumerable<string>? additionalRoots = null)
     {
-        using var watcher = session.Mode == LaunchMode.MalwareSafe ? CreateWatcher(gameDirectory, onAlert) : null;
+        var watchers = new List<FileSystemWatcher> { CreateWatcher(gameDirectory, ScanScope.GameCore, onAlert) };
+        foreach (var root in additionalRoots ?? []) if (Directory.Exists(root)) watchers.Add(CreateWatcher(root, ScanScope.SteamWorkshop, onAlert));
         var reportedProcessIds = new HashSet<int>();
-        while (!cancellationToken.IsCancellationRequested)
+        var knownEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
         {
-            if (session.Process.HasExited) return;
-
-            if (session.Mode == LaunchMode.MalwareSafe)
+            while (!cancellationToken.IsCancellationRequested)
             {
+                if (session.Process.HasExited) return;
                 foreach (var child in ProcessTree.Descendants(session.Process.Id))
                 {
                     if (!reportedProcessIds.Add(child.ProcessId)) continue;
                     if (ClearlyDangerousChildren.Contains(child.Name))
                     {
-                        var alert = new BehaviorAlert(ScanCategory.Malware, "Blocked child process", $"People Playground spawned {child.Name}, which is not allowed in Malware Safe Mode.", true);
-                        _events.Log(alert.Title, alert.Detail, alert.Category);
-                        onAlert(alert);
-                        ProcessTree.KillTree(session.Process);
-                        return;
+                        Alert(onAlert, new BehaviorAlert(ScanCategory.Malware, "Blocked child process", $"People Playground spawned {child.Name}, which is not allowed.", true));
+                        ProcessTree.KillTree(session.Process); return;
                     }
-
-                    if (!string.Equals(child.Name, "UnityCrashHandler64.exe", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(child.Name, "conhost.exe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var alert = new BehaviorAlert(ScanCategory.Suspicious, "Unexpected child process", $"People Playground spawned {child.Name}. Review the event log.", false);
-                        _events.Log(alert.Title, alert.Detail, alert.Category);
-                        onAlert(alert);
-                    }
+                    if (!string.Equals(child.Name, "UnityCrashHandler64.exe", StringComparison.OrdinalIgnoreCase) && !string.Equals(child.Name, "conhost.exe", StringComparison.OrdinalIgnoreCase))
+                        Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Unexpected child process", $"People Playground spawned {child.Name}.", false));
                 }
+                foreach (var endpoint in NetworkActivityMonitor.Snapshot().Where(x => x.ProcessId == session.Process.Id || reportedProcessIds.Contains(x.ProcessId)))
+                {
+                    var key = $"{endpoint.Protocol}|{endpoint.Local}|{endpoint.Remote}|{endpoint.ProcessId}";
+                    if (knownEndpoints.Add(key)) Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Game network activity", $"PPG process opened {endpoint.Protocol} {endpoint.Remote}.", false));
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
             }
-
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
         }
+        finally { foreach (var watcher in watchers) watcher.Dispose(); }
     }
 
-    private static FileSystemWatcher CreateWatcher(string gameDirectory, Action<BehaviorAlert> onAlert)
+    private FileSystemWatcher CreateWatcher(string root, ScanScope scope, Action<BehaviorAlert> onAlert)
     {
-        var watcher = new FileSystemWatcher(gameDirectory)
-        {
-            IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-            EnableRaisingEvents = true,
-            Filter = "*.*"
-        };
+        var watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size, Filter = "*.*", EnableRaisingEvents = true };
         FileSystemEventHandler handler = (_, args) =>
         {
-            var extension = Path.GetExtension(args.FullPath);
-            if (!new[] { ".dll", ".exe", ".ps1", ".bat", ".cmd" }.Contains(extension, StringComparer.OrdinalIgnoreCase)) return;
-            var known = Path.GetFileName(args.FullPath).Contains("FPSPlusPlus", StringComparison.OrdinalIgnoreCase);
-            onAlert(new BehaviorAlert(known ? ScanCategory.Malware : ScanCategory.Suspicious, "Game files changed during safe launch", args.FullPath, known));
+            var effectiveScope = scope == ScanScope.GameCore ? ScopeFor(root, args.FullPath) : scope;
+            var report = _scanner.ScanFile(args.FullPath, effectiveScope);
+            foreach (var finding in report.Findings)
+                Alert(onAlert, new BehaviorAlert(finding.Category, "Changed content detected", $"{finding.FilePath}: {finding.Rule}", finding.Category == ScanCategory.Malware));
         };
-        watcher.Created += handler;
-        watcher.Changed += handler;
-        watcher.Renamed += (_, args) => handler(watcher, new FileSystemEventArgs(WatcherChangeTypes.Renamed, Path.GetDirectoryName(args.FullPath) ?? gameDirectory, Path.GetFileName(args.FullPath)));
+        watcher.Created += handler; watcher.Changed += handler;
+        watcher.Renamed += (_, args) => handler(watcher, new FileSystemEventArgs(WatcherChangeTypes.Renamed, Path.GetDirectoryName(args.FullPath) ?? root, Path.GetFileName(args.FullPath)));
         return watcher;
+    }
+
+    private void Alert(Action<BehaviorAlert> callback, BehaviorAlert alert)
+    {
+        _events.Log(alert.Title, alert.Detail, alert.Category);
+        callback(alert);
+    }
+
+    private static ScanScope ScopeFor(string root, string path)
+    {
+        var parts = Path.GetRelativePath(root, path).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (parts.Any(x => x.Equals("Mods", StringComparison.OrdinalIgnoreCase))) return ScanScope.LocalMods;
+        if (parts.Any(x => x.Equals("Workshop", StringComparison.OrdinalIgnoreCase))) return ScanScope.SteamWorkshop;
+        return ScanScope.GameCore;
     }
 }

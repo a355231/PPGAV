@@ -19,6 +19,9 @@ static class SmokeTests
             TestScannerIncludesExternalWorkshop(root);
             TestPreflightRoutesUntrustedAndCoreFindings();
             TestSandboxProviderSelection();
+            TestIntegrityBaselineDetectsChangedCore(root);
+            TestQuarantineMovesOnlySelectedFiles(root);
+            TestNetworkEndpointParser();
             await TestBackupRoundTrip(root);
             TestBackupRejectsTraversal(root);
             TestSandboxProfileIsIsolated(root);
@@ -100,6 +103,44 @@ static class SmokeTests
         Assert(SandboxProviderSelector.Choose(true, true) == SandboxProvider.WindowsSandbox, "Windows Sandbox was not preferred");
         Assert(SandboxProviderSelector.Choose(false, true) == SandboxProvider.SandboxieClassic, "Sandboxie fallback was not selected");
         Assert(SandboxProviderSelector.Choose(false, false) == SandboxProvider.None, "missing sandbox was not reported");
+        _passed++;
+    }
+
+    private static void TestIntegrityBaselineDetectsChangedCore(string root)
+    {
+        var game = Path.Combine(root, "integrity-game");
+        Directory.CreateDirectory(game);
+        var file = Path.Combine(game, "People Playground.exe");
+        File.WriteAllText(file, "trusted-fixture");
+        var baseline = Path.Combine(root, "integrity-baseline.json");
+        var service = new IntegrityBaselineService(baseline);
+        Assert(service.CheckAndUpdate(game).Count == 0, "initial integrity baseline was not created cleanly");
+        File.WriteAllText(file, "changed-fixture");
+        Assert(service.CheckAndUpdate(game).Any(f => f.Rule == "trusted-file-changed"), "changed core file was not detected");
+        _passed++;
+    }
+
+    private static void TestQuarantineMovesOnlySelectedFiles(string root)
+    {
+        var content = Path.Combine(root, "quarantine-mod");
+        var quarantine = Path.Combine(root, "quarantine-store");
+        Directory.CreateDirectory(content);
+        var bad = Path.Combine(content, "bad.ps1");
+        var good = Path.Combine(content, "good.txt");
+        File.WriteAllText(bad, "bad"); File.WriteAllText(good, "good");
+        var report = new ScanReport();
+        report.Findings.Add(new ScanFinding(ScanCategory.Malware, bad, "test", "bad", "hash", ScanScope.LocalMods, 100));
+        var moved = new QuarantineService(quarantine).Quarantine(report);
+        Assert(moved.Count == 1 && !File.Exists(bad) && File.Exists(good), "quarantine moved the wrong files");
+        Assert(File.Exists(moved[0].QuarantinedPath), "quarantine copy was not created");
+        _passed++;
+    }
+
+    private static void TestNetworkEndpointParser()
+    {
+        var lines = new[] { "TCP    127.0.0.1:1234    8.8.8.8:443    ESTABLISHED    456", "UDP    0.0.0.0:5353    *:*    456" };
+        var endpoints = NetworkActivityMonitor.ParseNetstat(lines);
+        Assert(endpoints.Count == 2 && endpoints.All(x => x.ProcessId == 456), "network endpoint parser missed process ownership");
         _passed++;
     }
 

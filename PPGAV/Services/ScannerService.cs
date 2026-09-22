@@ -15,6 +15,7 @@ public sealed class ScannerService
         new("credential-theft", @"Login Data|Local State|Cookies|Web Data|passwords?|tokens?|discord|wallet|Steam\\config|ssfn\d+", 55, "References credentials, browser, Discord, wallet, or Steam secrets."),
         new("network-access/data-exfiltration", @"webhook|HttpClient|WebClient|HttpWebRequest|TcpClient|UdpClient|Socket|Upload(String|Data|File)|PostAsync", 25, "Can communicate with or upload data to the network."),
         new("persistence", @"CurrentVersion\\Run|Startup|schtasks|TaskScheduler|CreateService|ServiceController|Winlogon|Registry.*(SetValue|CreateSubKey)", 55, "Can establish Windows persistence."),
+        new("delayed-execution", @"Timer|Task\.Delay|Thread\.Sleep|DateTime\.(Now|UtcNow)|Environment\.TickCount|Mutex|NamedPipe", 20, "Contains delayed-trigger, mutex, or synchronization behavior."),
         new("process-injection", @"OpenProcess|VirtualAllocEx|WriteProcessMemory|CreateRemoteThread|QueueUserAPC|SetThreadContext|NtMapViewOfSection", 80, "Contains process-injection primitives."),
         new("security-tampering", @"Set-MpPreference|Add-MpPreference|DisableRealtimeMonitoring|WinDefend|SecurityHealth|firewall.*(disable|off)|bcdedit|NtRaiseHardError", 80, "Attempts to weaken Windows security or system stability."),
         new("destructive-io", @"(File|Directory)\s*\.\s*(Delete|Move)\b|DeleteFile|SHFileOperation|Format-Volume|Remove-Item\s+-Recurse", 35, "Can delete or destructively move files."),
@@ -30,6 +31,13 @@ public sealed class ScannerService
     private static readonly HashSet<string> PayloadExtensions = new(StringComparer.OrdinalIgnoreCase) { ".exe", ".com", ".scr", ".msi", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".hta", ".lnk" };
 
     public ScanReport Scan(string rootPath, CancellationToken token = default) => ScanInstallation(rootPath, [], token);
+    public ScanReport ScanFile(string filePath, ScanScope scope = ScanScope.Unknown)
+    {
+        var report = new ScanReport { RootPath = filePath, StartedAt = DateTimeOffset.Now };
+        if (File.Exists(filePath)) InspectFile(filePath, scope, report);
+        report.CompletedAt = DateTimeOffset.Now;
+        return report;
+    }
     public ScanReport ScanInstallation(string gameRoot, IEnumerable<string> workshopRoots, CancellationToken token = default)
     {
         var report = new ScanReport { RootPath = gameRoot, StartedAt = DateTimeOffset.Now };

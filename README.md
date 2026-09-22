@@ -9,6 +9,8 @@ PPGAV is a Windows tray utility for launching and monitoring People Playground w
 
 The scanner does not execute mods. Its risk engine covers known PPG malware markers, credential theft, persistence, process injection, Defender tampering, destructive I/O, dynamic/encoded payloads, process launch, network exfiltration, native code, anti-analysis, and Workshop modification. It also inspects untrusted assemblies, scripts, ZIP entry paths, expansion ratios, and executable payloads. A `Safe` result means none of these layers found a threat; it is not a mathematical proof that arbitrary code is benign.
 
+Additional unknown-threat defenses include a trusted core-file integrity baseline, quarantine of confirmed malicious files, runtime network endpoint observation, dangerous-child-process blocking in every launch mode, delayed-execution/mutex indicators, and continuous rescanning of game and Workshop changes while PPG is running. The baseline is stored locally under `%LocalAppData%\\PPGAV` and is refreshed only after each preflight; a changed core file fails closed until reviewed.
+
 ## Build and install
 
 Requirements: Windows 10/11 and the .NET 10 SDK. The installer uses Windows Sandbox when present; otherwise it provisions Sandboxie Classic from WinGet. Pass `-SkipSandboxDependency` only for offline packaging.

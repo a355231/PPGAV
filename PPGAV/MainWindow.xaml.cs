@@ -17,6 +17,8 @@ public partial class MainWindow : Window
     private readonly EventLogService _events;
     private readonly StartupService _startup;
     private readonly ScannerService _scanner;
+    private readonly IntegrityBaselineService _integrity;
+    private readonly QuarantineService _quarantine;
     private readonly BackupService _backup;
     private readonly DefenderService _defender;
     private readonly WindowsSandboxService _sandbox;
@@ -27,6 +29,7 @@ public partial class MainWindow : Window
     private readonly Forms.NotifyIcon _trayIcon;
     private readonly Forms.ContextMenuStrip _trayMenu;
     private LaunchSession? _session;
+    private ScanReport _lastReport = new();
     private CancellationTokenSource? _sessionCancellation;
     private bool _allowClose;
 
@@ -36,6 +39,8 @@ public partial class MainWindow : Window
         EventLogService events,
         StartupService startup,
         ScannerService scanner,
+        IntegrityBaselineService integrity,
+        QuarantineService quarantine,
         BackupService backup,
         DefenderService defender,
         WindowsSandboxService sandbox,
@@ -49,6 +54,8 @@ public partial class MainWindow : Window
         _events = events;
         _startup = startup;
         _scanner = scanner;
+        _integrity = integrity;
+        _quarantine = quarantine;
         _backup = backup;
         _defender = defender;
         _sandbox = sandbox;
@@ -148,6 +155,8 @@ public partial class MainWindow : Window
             if (decision == PreflightAction.BlockAll) return;
             if (decision == PreflightAction.LaunchSafeMode)
             {
+                var quarantined = _quarantine.Quarantine(_lastReport);
+                if (quarantined.Count > 0) _events.Log("Malware quarantined", $"Moved {quarantined.Count} malicious file(s) out of mod/Workshop content before safe launch.", ScanCategory.Malware);
                 MessageBox.Show(this, "Threats were found in mod or Workshop content. Normal startup was aborted; PPGAV is relaunching without mods, Steam connectivity, or network access.", "Malware Safe Mode", MessageBoxButton.OK, MessageBoxImage.Warning);
                 await ObserveSessionAsync(_safeMode.Launch(_settings));
                 return;
@@ -195,6 +204,9 @@ public partial class MainWindow : Window
     private async Task<PreflightAction> RunPreflightAsync()
     {
         var report = await ScanAsync();
+        foreach (var finding in await Task.Run(() => _integrity.CheckAndUpdate(_settings.GameDirectory), _appCancellation.Token)) report.Findings.Add(finding);
+        _lastReport = report;
+        ApplyReport(report);
         SetStatus("Defender preflight", SuspiciousBrushKey());
         var defender = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
         var decision = PreflightDecisionEngine.Decide(report, defender.Started && defender.ExitCode == 0);
@@ -220,6 +232,7 @@ public partial class MainWindow : Window
         SetStatus("Inspecting", SuspiciousBrushKey());
         var workshops = GamePathDiscovery.FindWorkshopDirectories(_settings.GameDirectory);
         var report = await Task.Run(() => _scanner.ScanInstallation(_settings.GameDirectory, workshops, _appCancellation.Token));
+        _lastReport = report;
         ApplyReport(report);
         LatestScanText.Text = $"Last scan {report.CompletedAt:HH:mm:ss} · {report.FilesInspected} files inspected · {report.Category}";
         _events.Log("Inspection complete", $"Inspected {report.FilesInspected} files: {report.Category}, {report.Findings.Count} finding(s).", report.Category);
@@ -230,6 +243,8 @@ public partial class MainWindow : Window
     private async Task RespondToMalwareAsync(ScanReport report)
     {
         SetStatus("Malware blocked", MalwareBrushKey());
+        var quarantined = _quarantine.Quarantine(report);
+        if (quarantined.Count > 0) _events.Log("Malware quarantined", $"Moved {quarantined.Count} malicious file(s) into the local quarantine store.", ScanCategory.Malware);
         MessageBox.Show(this, "PPGAV found a malware-level signature. The game will not be launched. A Windows Defender full scan is starting now.", "Malware detected", MessageBoxButton.OK, MessageBoxImage.Error);
         if (_session is not null) StopSessionProcess();
         _events.Log("Malware response started", "Launch was blocked and Windows Defender full scan was requested.", ScanCategory.Malware);
@@ -308,7 +323,7 @@ public partial class MainWindow : Window
         _sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(_appCancellation.Token);
         SetStatus(session.Mode == LaunchMode.SecureSandbox ? "Sandbox active" : "Safe Mode active", AccentBrushKey());
         var monitorTask = _settings.WatchProcess
-            ? _monitor.MonitorAsync(session, _settings.GameDirectory, alert => _ = HandleBehaviorAlertAsync(alert, session), _sessionCancellation.Token)
+            ? _monitor.MonitorAsync(session, _settings.GameDirectory, alert => _ = HandleBehaviorAlertAsync(alert, session), _sessionCancellation.Token, GamePathDiscovery.FindWorkshopDirectories(_settings.GameDirectory))
             : Task.CompletedTask;
         try
         {

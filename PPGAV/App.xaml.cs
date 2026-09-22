@@ -24,6 +24,8 @@ public partial class App : WpfApplication
         var events = new EventLogService();
         var startup = new StartupService();
         var scanner = new ScannerService();
+        var integrity = new IntegrityBaselineService();
+        var quarantine = new QuarantineService();
         var backup = new BackupService(events);
         var defender = new DefenderService(events);
         var firewall = new FirewallService(events);
@@ -31,9 +33,9 @@ public partial class App : WpfApplication
         var sandboxie = new SandboxieService(events);
         var safeMode = new SafeModeLauncher(firewall, events);
         safeMode.RecoverStaleDisabledMods(settings.GameDirectory);
-        var monitor = new BehaviorMonitor(events);
+        var monitor = new BehaviorMonitor(events, scanner);
 
-        _mainWindow = new MainWindow(settingsService, settings, events, startup, scanner, backup, defender, sandbox, sandboxie, safeMode, monitor)
+        _mainWindow = new MainWindow(settingsService, settings, events, startup, scanner, integrity, quarantine, backup, defender, sandbox, sandboxie, safeMode, monitor)
         {
             StartHidden = e.Args.Any(arg => arg.Equals("--startup", StringComparison.OrdinalIgnoreCase)) || settings.StartMinimized
         };
