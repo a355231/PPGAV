@@ -86,6 +86,9 @@ public sealed class ScannerService
                 if (AmsiScanner.IsMalware(bytes, file)) Add(report, ScanCategory.Malware, file, "windows-amsi-binary", "AMSI classified an untrusted binary as malware.", hash, scope, 100);
                 if (IsPortableExecutable(bytes)) Add(report, ScanCategory.Suspicious, file, "untrusted-portable-executable", "An untrusted mod contains a Windows PE binary; its imports and entropy are inspected.", hash, scope, 45);
                 if (ShannonEntropy(bytes) >= 7.2) Add(report, ScanCategory.Suspicious, file, "high-entropy-binary", "The untrusted binary has high entropy consistent with packing or obfuscation.", hash, scope, 45);
+                var signature = AuthenticodeService.Inspect(file);
+                if (!signature.Signed) Add(report, ScanCategory.Suspicious, file, "unsigned-native-binary", "The untrusted native binary has no Authenticode signature.", hash, scope, 25);
+                else if (!signature.Trusted) Add(report, ScanCategory.Suspicious, file, "untrusted-authenticode", $"The native binary signature chain is not trusted: {signature.Subject}.", hash, scope, 30);
                 content = ExtractStrings(bytes);
             }
         }
@@ -94,6 +97,7 @@ public sealed class ScannerService
         var amsiBytes = Encoding.UTF8.GetBytes(content);
         if (AmsiScanner.IsMalware(amsiBytes, file)) { Add(report, ScanCategory.Malware, file, "windows-amsi", "Windows Antimalware Scan Interface classified the content as malware.", hash, scope, 100); return; }
         if (KnownMalware.IsMatch(content)) { Add(report, ScanCategory.Malware, file, "known-ppg-malware-signature", "Contains a known PPG malware marker.", hash, scope, 100); return; }
+        if (LooksObfuscated(content)) Add(report, ScanCategory.Suspicious, file, "obfuscated-text-payload", "Text content contains a long encoded/obfuscated payload pattern.", hash, scope, 35);
         var matched = Rules.Where(r => Rx(r.Pattern).IsMatch(content)).ToArray();
         if (matched.Length == 0) return;
         var score = Math.Min(100, matched.Sum(x => x.Score));
@@ -106,7 +110,17 @@ public sealed class ScannerService
         try
         {
             using var zip = ZipFile.OpenRead(file);
-            foreach (var entry in zip.Entries.Take(4096))
+            InspectArchiveEntries(zip, file, scope, hash, report, 0);
+        }
+        catch (InvalidDataException) { Add(report, ScanCategory.Suspicious, file, "invalid-archive", "Archive is malformed or unreadable.", hash, scope, 50); }
+    }
+
+    private static void InspectArchiveEntries(ZipArchive zip, string file, ScanScope scope, string hash, ScanReport report, int depth)
+    {
+        if (depth > 3) return;
+        foreach (var entry in zip.Entries.Take(4096))
+        {
+            try
             {
                 var normalized = entry.FullName.Replace('\\', '/');
                 if (normalized.StartsWith('/') || normalized.Split('/').Contains("..") || Path.IsPathRooted(entry.FullName))
@@ -115,9 +129,15 @@ public sealed class ScannerService
                     Add(report, ScanCategory.Malware, file, "archive-executable-payload", $"Archive contains executable/script entry: {entry.FullName}", hash, scope, 90);
                 if (entry.Length > 256L * 1024 * 1024 || entry.CompressedLength > 0 && entry.Length / Math.Max(1, entry.CompressedLength) > 200)
                     Add(report, ScanCategory.Suspicious, file, "archive-bomb", $"Archive entry has dangerous expansion characteristics: {entry.FullName}", hash, scope, 60);
+                if (Path.GetExtension(entry.Name).Equals(".zip", StringComparison.OrdinalIgnoreCase) && entry.Length <= 64L * 1024 * 1024)
+                {
+                    using var nestedStream = new MemoryStream(); using (var input = entry.Open()) input.CopyTo(nestedStream); nestedStream.Position = 0;
+                    using var nested = new ZipArchive(nestedStream, ZipArchiveMode.Read);
+                    InspectArchiveEntries(nested, file, scope, hash, report, depth + 1);
+                }
             }
+            catch (InvalidDataException) { Add(report, ScanCategory.Suspicious, file, "invalid-nested-archive", $"Nested archive is malformed: {entry.FullName}", hash, scope, 55); }
         }
-        catch (InvalidDataException) { Add(report, ScanCategory.Suspicious, file, "invalid-archive", "Archive is malformed or unreadable.", hash, scope, 50); }
     }
 
     private static ScanScope ScopeFor(string root, string path)
@@ -135,6 +155,7 @@ public sealed class ScannerService
         var counts = new int[256]; foreach (var value in bytes) counts[value]++;
         return counts.Where(x => x > 0).Sum(x => { var p = (double)x / bytes.Length; return -p * Math.Log2(p); });
     }
+    private static bool LooksObfuscated(string content) => Regex.IsMatch(content, @"[A-Za-z0-9+/]{240,}={0,2}") || (ShannonEntropy(Encoding.UTF8.GetBytes(content)) >= 5.5 && content.Length > 512);
     private static Regex Rx(string pattern) => new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static void Add(ScanReport r, ScanCategory c, string f, string rule, string d, string h, ScanScope s, int score) => r.Findings.Add(new(c, f, rule, d, h, s, score));
     private static string Hash(string file) { try { using var stream = File.OpenRead(file); return Convert.ToHexString(SHA256.HashData(stream)); } catch { return string.Empty; } }

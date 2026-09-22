@@ -13,11 +13,14 @@ public sealed class AppSettings
     public bool WatchProcess { get; set; } = true;
     public bool UseWindowsSandbox { get; set; } = true;
     public bool RequireNetworkBlockInSafeMode { get; set; } = true;
+    public bool AutomaticUpdates { get; set; } = true;
+    public int UpdateCheckIntervalHours { get; set; } = 6;
 
     public void Normalize()
     {
         BackupIntervalHours = Math.Clamp(BackupIntervalHours, 1, 24);
         BackupRetentionCount = Math.Clamp(BackupRetentionCount, 1, 100);
+        UpdateCheckIntervalHours = Math.Clamp(UpdateCheckIntervalHours, 1, 24);
         GameDirectory = NormalizePath(GameDirectory);
         PpgExecutablePath = NormalizePath(PpgExecutablePath);
         BackupDirectory = NormalizePath(BackupDirectory);

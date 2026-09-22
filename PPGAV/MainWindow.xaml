@@ -149,6 +149,7 @@
                                 <CheckBox x:Name="WatchProcessBox" Content="Watch process behavior" />
                                 <CheckBox x:Name="UseWindowsSandboxBox" Content="Prefer Windows Sandbox" />
                                 <CheckBox x:Name="RequireNetworkBlockBox" Content="Require safe-mode network block" />
+                                <CheckBox x:Name="AutomaticUpdatesBox" Content="Automatically install verified updates" />
                             </WrapPanel>
                             <WrapPanel Margin="0,3,0,0">
                                 <TextBlock Text="Backup every" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" Margin="0,0,8,0" />

@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     private readonly ScannerService _scanner;
     private readonly IntegrityBaselineService _integrity;
     private readonly QuarantineService _quarantine;
+    private readonly UpdateService _updates;
     private readonly BackupService _backup;
     private readonly DefenderService _defender;
     private readonly WindowsSandboxService _sandbox;
@@ -41,6 +42,7 @@ public partial class MainWindow : Window
         ScannerService scanner,
         IntegrityBaselineService integrity,
         QuarantineService quarantine,
+        UpdateService updates,
         BackupService backup,
         DefenderService defender,
         WindowsSandboxService sandbox,
@@ -56,6 +58,7 @@ public partial class MainWindow : Window
         _scanner = scanner;
         _integrity = integrity;
         _quarantine = quarantine;
+        _updates = updates;
         _backup = backup;
         _defender = defender;
         _sandbox = sandbox;
@@ -95,6 +98,7 @@ public partial class MainWindow : Window
             : _sandboxie.IsAvailable ? "Sandboxie Classic detected - open-source fallback containment is active."
             : "No supported sandbox detected - install Sandboxie Classic for secure launch.";
         _ = BackupLoopAsync();
+        _ = UpdateLoopAsync();
     }
 
     public bool StartHidden { get; set; }
@@ -115,6 +119,7 @@ public partial class MainWindow : Window
         WatchProcessBox.IsChecked = _settings.WatchProcess;
         UseWindowsSandboxBox.IsChecked = _settings.UseWindowsSandbox;
         RequireNetworkBlockBox.IsChecked = _settings.RequireNetworkBlockInSafeMode;
+        AutomaticUpdatesBox.IsChecked = _settings.AutomaticUpdates;
         BackupIntervalBox.Text = _settings.BackupIntervalHours.ToString();
         BackupRetentionBox.Text = _settings.BackupRetentionCount.ToString();
     }
@@ -132,6 +137,7 @@ public partial class MainWindow : Window
         _settings.WatchProcess = WatchProcessBox.IsChecked == true;
         _settings.UseWindowsSandbox = UseWindowsSandboxBox.IsChecked == true;
         _settings.RequireNetworkBlockInSafeMode = RequireNetworkBlockBox.IsChecked == true;
+        _settings.AutomaticUpdates = AutomaticUpdatesBox.IsChecked == true;
         _settings.Normalize();
         _settingsService.Save(_settings);
         _startup.SetEnabled(_settings.StartWithWindows);
@@ -387,6 +393,38 @@ public partial class MainWindow : Window
                 }
                 catch (Exception ex) { _events.Log("Scheduled backup failed", ex.Message, ScanCategory.Suspicious); }
             }
+        }
+    }
+
+    private async Task UpdateLoopAsync()
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(15), _appCancellation.Token); }
+        catch (OperationCanceledException) { return; }
+        while (!_appCancellation.IsCancellationRequested)
+        {
+            if (_settings.AutomaticUpdates && _session is null)
+            {
+                try
+                {
+                    var current = typeof(MainWindow).Assembly.GetName().Version ?? new Version(1, 0);
+                    var update = await _updates.CheckLatestAsync(_appCancellation.Token);
+                    if (update is not null && UpdateService.IsNewerVersion(update.Version, current))
+                    {
+                        _events.Log("Update available", $"PPGAV {update.Tag} was verified against the GitHub release digest and will be installed.");
+                        _trayIcon.ShowBalloonTip(3000, "PPGAV update", $"Installing verified update {update.Tag}.", Forms.ToolTipIcon.Info);
+                        var msi = await _updates.DownloadAndVerifyAsync(update, _appCancellation.Token);
+                        Process.Start(new ProcessStartInfo("msiexec.exe") { UseShellExecute = true, Arguments = $"/i \"{msi}\" /quiet /norestart" });
+                        _allowClose = true;
+                        _appCancellation.Cancel();
+                        System.Windows.Application.Current.Shutdown();
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex) { _events.Log("Automatic update check failed", ex.Message, ScanCategory.Suspicious); }
+            }
+            try { await Task.Delay(TimeSpan.FromHours(_settings.UpdateCheckIntervalHours), _appCancellation.Token); }
+            catch (OperationCanceledException) { return; }
         }
     }
 

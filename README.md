@@ -11,6 +11,8 @@ The scanner does not execute mods. Its risk engine covers known PPG malware mark
 
 Additional unknown-threat defenses include a trusted core-file integrity baseline, quarantine of confirmed mod/Workshop malware only, runtime network endpoint observation with external-network termination, dangerous-child-process blocking in every launch mode, delayed-execution/mutex indicators, binary PE/entropy analysis, and continuous rescanning of game and Workshop changes while PPG is running. The baseline is stored locally under `%LocalAppData%\\PPGAV`; changed core files never replace the baseline automatically and fail closed until reviewed.
 
+PPGAV also checks the official GitHub release feed every six hours by default. It accepts only HTTPS MSI assets from the pinned repository, requires the GitHub-provided SHA-256 release digest to match, downloads to a private update directory, and launches Windows Installer only after verification. Automatic installation can be disabled in the dashboard.
+
 ## Build and install
 
 Requirements: Windows 10/11 and the .NET 10 SDK. The installer uses Windows Sandbox when present; otherwise it provisions Sandboxie Classic from WinGet. Pass `-SkipSandboxDependency` only for offline packaging.

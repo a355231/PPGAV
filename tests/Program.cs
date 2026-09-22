@@ -24,6 +24,9 @@ static class SmokeTests
             TestQuarantineLeavesCoreFilesInPlace(root);
             TestBinaryModIsFlagged(root);
             TestNetworkEndpointParser();
+            TestUpdateVerificationHelpers(root);
+            TestModulePathClassification(root);
+            TestRecursiveArchiveDetection(root);
             await TestBackupRoundTrip(root);
             TestBackupRejectsTraversal(root);
             TestSandboxProfileIsIsolated(root);
@@ -164,6 +167,41 @@ static class SmokeTests
         File.WriteAllBytes(Path.Combine(mods, "native.dll"), bytes);
         var report = new ScannerService().Scan(Path.Combine(root, "binary-mod"));
         Assert(report.Findings.Any(f => f.Rule == "untrusted-portable-executable"), "untrusted PE mod was not flagged");
+        _passed++;
+    }
+
+    private static void TestUpdateVerificationHelpers(string root)
+    {
+        Assert(UpdateService.IsNewerVersion(new Version(1, 3), new Version(1, 2)), "newer update was not recognized");
+        Assert(!UpdateService.IsNewerVersion(new Version(1, 2), new Version(1, 2)), "same update was treated as newer");
+        var file = Path.Combine(root, "update.msi"); File.WriteAllText(file, "signed release fixture");
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(file)));
+        Assert(UpdateService.VerifySha256(file, digest), "release digest verification failed");
+        Assert(!UpdateService.VerifySha256(file, new string('0', 64)), "bad release digest was accepted");
+        _passed++;
+    }
+
+    private static void TestModulePathClassification(string root)
+    {
+        Assert(BehaviorMonitor.IsSuspiciousModulePath(Path.Combine(root, "AppData", "Temp", "evil.dll")), "user temp module was not classified suspicious");
+        Assert(!BehaviorMonitor.IsSuspiciousModulePath(Path.Combine(Environment.SystemDirectory, "kernel32.dll")), "Windows system module was classified suspicious");
+        _passed++;
+    }
+
+    private static void TestRecursiveArchiveDetection(string root)
+    {
+        var mods = Path.Combine(root, "nested-archive", "Mods"); Directory.CreateDirectory(mods);
+        var nestedPath = Path.Combine(root, "nested.zip");
+        using (var nested = ZipFile.Open(nestedPath, ZipArchiveMode.Create))
+        {
+            var payload = nested.CreateEntry("dropper.ps1"); using var writer = new StreamWriter(payload.Open()); writer.Write("powershell -enc AAAA");
+        }
+        using (var outer = ZipFile.Open(Path.Combine(mods, "outer.zip"), ZipArchiveMode.Create))
+        {
+            var entry = outer.CreateEntry("nested.zip"); using var source = File.OpenRead(nestedPath); using var target = entry.Open(); source.CopyTo(target);
+        }
+        var report = new ScannerService().Scan(Path.Combine(root, "nested-archive"));
+        Assert(report.Findings.Any(f => f.Rule == "archive-executable-payload"), "nested archive executable payload was not detected");
         _passed++;
     }
 

@@ -24,6 +24,7 @@ public sealed class BehaviorMonitor
         var watchers = new List<FileSystemWatcher> { CreateWatcher(gameDirectory, ScanScope.GameCore, onAlert) };
         foreach (var root in additionalRoots ?? []) if (Directory.Exists(root)) watchers.Add(CreateWatcher(root, ScanScope.SteamWorkshop, onAlert));
         var reportedProcessIds = new HashSet<int>();
+        var reportedModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var knownEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -40,6 +41,25 @@ public sealed class BehaviorMonitor
                     }
                     if (!string.Equals(child.Name, "UnityCrashHandler64.exe", StringComparison.OrdinalIgnoreCase) && !string.Equals(child.Name, "conhost.exe", StringComparison.OrdinalIgnoreCase))
                         Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Unexpected child process", $"People Playground spawned {child.Name}.", false));
+                }
+                foreach (var processId in reportedProcessIds.Append(session.Process.Id))
+                {
+                    try
+                    {
+                        using var inspected = Process.GetProcessById(processId);
+                        foreach (ProcessModule module in inspected.Modules)
+                        {
+                            var path = module.FileName;
+                            if (!reportedModules.Add(path)) continue;
+                            var underMods = path.StartsWith(Path.Combine(gameDirectory, "Mods") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || path.StartsWith(Path.Combine(gameDirectory, "Workshop") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+                            if (underMods || IsSuspiciousModulePath(path))
+                            {
+                                Alert(onAlert, new BehaviorAlert(ScanCategory.Malware, "Suspicious module load", $"PPG loaded an untrusted module: {path}", true));
+                                ProcessTree.KillTree(session.Process); return;
+                            }
+                        }
+                    }
+                    catch { }
                 }
                 foreach (var endpoint in NetworkActivityMonitor.Snapshot().Where(x => x.ProcessId == session.Process.Id || reportedProcessIds.Contains(x.ProcessId)))
                 {
@@ -90,5 +110,14 @@ public sealed class BehaviorMonitor
     {
         var value = remote.Split(':')[0];
         return value is not ("*" or "0.0.0.0" or "127.0.0.1" or "::1" or "[::1]") && !value.StartsWith("127.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsSuspiciousModulePath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        var temp = Path.GetFullPath(Path.GetTempPath());
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+        return full.StartsWith(temp, StringComparison.OrdinalIgnoreCase) || full.StartsWith(appData, StringComparison.OrdinalIgnoreCase) || full.StartsWith(downloads, StringComparison.OrdinalIgnoreCase);
     }
 }
