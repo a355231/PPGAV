@@ -1,0 +1,18 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# Local runtime/install data
+*.user
+*.suo
+*.tmp
+*.log
+*.ppgbackup.zip
+
+# Local agent/task state that may contain machine-specific details
+.autocontinue/
+.agents/
+
+# IDE/editor files
+.vs/
+.idea/
