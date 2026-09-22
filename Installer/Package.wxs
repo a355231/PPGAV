@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="PPGAV - People Playground Antivirus Guard"
+           Manufacturer="PPGAV"
+           Version="1.1.0.0"
+           UpgradeCode="A8D6F6C1-8A3D-4A6B-8B5A-4A9C5F7B31D2"
+           Scope="perUser">
+    <SummaryInformation Description="People Playground Antivirus Guard" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of PPGAV is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="PPGAV" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="PPGAVPROGRAMS" Name="PPGAV" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="PPGAV" Level="1">
+      <ComponentRef Id="ApplicationComponent" />
+      <ComponentRef Id="StartMenuComponent" />
+    </Feature>
+
+    <Component Id="ApplicationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="PPGAVEXE" Source="$(var.PublishDir)\PPGAV.exe" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="PPGAV" Type="string" Value="&quot;[#PPGAVEXE]&quot; --startup" />
+    </Component>
+
+    <Component Id="StartMenuComponent" Directory="PPGAVPROGRAMS" Guid="*">
+      <Shortcut Id="PPGAVShortcut" Name="PPGAV" Description="People Playground Antivirus Guard" Target="[#PPGAVEXE]" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemovePPGAVProgramFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\PPGAV" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

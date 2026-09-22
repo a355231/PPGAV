@@ -1,6 +1,8 @@
 # .NET build output
 **/bin/
 **/obj/
+Installer/staging/
+Installer/releases/
 
 # Local runtime/install data
 *.user
