@@ -16,6 +16,7 @@ public sealed class IntegrityBaselineService
 
     private sealed record BaselineFile(string Path, string Hash);
     private sealed record BaselineEnvelope(int FormatVersion, string Owner, string InstallationIdentity, string GameRoot, string Executable, List<BaselineFile> Files, string ProtectedPayload);
+    private sealed record ProtectedPayload(int FormatVersion, string Owner, string InstallationIdentity, string GameRoot, string Executable, List<BaselineFile> Files);
 
     public IntegrityBaselineService(string? baselinePath = null) => _baselinePath = baselinePath ?? Path.Combine(AppPaths.Root, "core-integrity.json");
 
@@ -79,8 +80,12 @@ public sealed class IntegrityBaselineService
         var baseline = JsonSerializer.Deserialize<BaselineEnvelope>(File.ReadAllText(_baselinePath)) ?? throw new InvalidDataException("Baseline is empty.");
         if (baseline.FormatVersion != FormatVersion || baseline.Owner != "PPGAV" || string.IsNullOrWhiteSpace(baseline.ProtectedPayload)) throw new InvalidDataException("Baseline metadata is invalid.");
         var payload = Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(baseline.ProtectedPayload), null, DataProtectionScope.CurrentUser));
-        using var document = JsonDocument.Parse(payload);
-        if (!document.RootElement.TryGetProperty("InstallationIdentity", out var identity) || identity.GetString() != baseline.InstallationIdentity) throw new InvalidDataException("Baseline protection validation failed.");
+        var protectedFields = JsonSerializer.Deserialize<ProtectedPayload>(payload) ?? throw new InvalidDataException("Baseline protection validation failed.");
+        if (protectedFields.InstallationIdentity != baseline.InstallationIdentity
+            || !string.Equals(protectedFields.GameRoot, baseline.GameRoot, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(protectedFields.Executable, baseline.Executable, StringComparison.OrdinalIgnoreCase)
+            || !protectedFields.Files.OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase).SequenceEqual(baseline.Files.OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase)))
+            throw new InvalidDataException("Baseline protection validation failed.");
         if (baseline.Files.Count == 0 || baseline.Files.Any(x => string.IsNullOrWhiteSpace(x.Path) || string.IsNullOrWhiteSpace(x.Hash))) throw new InvalidDataException("Baseline file records are invalid.");
         if (baseline.Files.Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != baseline.Files.Count) throw new InvalidDataException("Baseline contains duplicate paths.");
         return baseline;

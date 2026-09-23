@@ -49,7 +49,8 @@ public sealed class WindowsSandboxService
             var drive = new DriveInfo(Path.GetPathRoot(sessionRoot)!);
             if (drive.AvailableFreeSpace < totalBytes * 2 + 256L * 1024 * 1024) throw new IOException("Insufficient free space for a disposable Windows Sandbox staging copy.");
             var manifest = new StageManifest("PPGAV", sessionId, new()); WriteMarker(markerPath, manifest);
-            await CopyDirectoryAsync(gameRoot, stagedGameRoot, gameRoot, manifest, markerPath, cancellationToken);
+            await CopyDirectoryAsync(gameRoot, stagedGameRoot, gameRoot, manifest, cancellationToken);
+            WriteMarker(markerPath, manifest);
             VerifyStagedHashes(stagedGameRoot, manifest.Files);
             var stagedExecutable = Path.Combine(stagedGameRoot, Path.GetRelativePath(gameRoot, executable));
             SecurePathService.RequireExistingFile(stagedExecutable, "staged executable");
@@ -75,7 +76,7 @@ public sealed class WindowsSandboxService
 
     public static void Stop(LaunchSession session) { try { if (!session.Process.HasExited) session.Process.Kill(true); } catch { } }
 
-    private static async Task CopyDirectoryAsync(string source, string destination, string sourceRoot, StageManifest manifest, string markerPath, CancellationToken cancellationToken)
+    private static async Task CopyDirectoryAsync(string source, string destination, string sourceRoot, StageManifest manifest, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(destination);
         foreach (var file in Directory.EnumerateFiles(source))
@@ -87,12 +88,11 @@ public sealed class WindowsSandboxService
             await using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 64, useAsync: true)) await input.CopyToAsync(output, cancellationToken);
             await using var stagedInput = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
             manifest.Files[Path.GetRelativePath(sourceRoot, file)] = Convert.ToHexString(await SHA256.HashDataAsync(stagedInput, cancellationToken));
-            WriteMarker(markerPath, manifest);
         }
         foreach (var directory in Directory.EnumerateDirectories(source))
         {
             cancellationToken.ThrowIfCancellationRequested(); SecurePathService.RejectReparse(directory, "source directory");
-            await CopyDirectoryAsync(directory, Path.Combine(destination, Path.GetFileName(directory)), sourceRoot, manifest, markerPath, cancellationToken);
+            await CopyDirectoryAsync(directory, Path.Combine(destination, Path.GetFileName(directory)), sourceRoot, manifest, cancellationToken);
         }
     }
 
