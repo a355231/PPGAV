@@ -41,6 +41,12 @@ public static class SecurePathService
         return fullCandidate;
     }
 
+    public static bool IsWithin(string root, string candidate)
+    {
+        var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(candidate).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static void RejectReparse(string path, string name = "path")
     {
         var full = RequireAbsolute(path, name);

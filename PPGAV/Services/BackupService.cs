@@ -27,7 +27,7 @@ public sealed class BackupService
     {
         var root = SecurePathService.RequireExistingDirectory(gameDirectory, "game directory");
             var backupRoot = Path.GetFullPath(backupDirectory);
-            if (IsWithin(root, backupRoot) || IsWithin(backupRoot, root)) throw new InvalidOperationException("Backup directory must not contain or be contained by the game directory.");
+            if (SecurePathService.IsWithin(root, backupRoot) || SecurePathService.IsWithin(backupRoot, root)) throw new InvalidOperationException("Backup directory must not contain or be contained by the game directory.");
             Directory.CreateDirectory(backupRoot);
             SecurePathService.RejectReparse(backupRoot, "backup directory");
             var finalPath = Path.Combine(backupRoot, $"PPG-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.ppgbackup.zip");
@@ -69,7 +69,7 @@ public sealed class BackupService
         return Directory.GetFiles(backupDirectory, "*.ppgbackup.zip", SearchOption.TopDirectoryOnly).Select(path => new FileInfo(path)).OrderByDescending(x => x.CreationTimeUtc).Select(x => new BackupInfo(x.FullName, x.CreationTimeUtc, x.Length)).ToArray();
     }
 
-    public async Task RestoreAsync(string backupFile, string gameDirectory, string backupDirectory, CancellationToken cancellationToken = default)
+    public async Task RestoreAsync(string backupFile, string gameDirectory, string backupDirectory, int retentionCount = 8, CancellationToken cancellationToken = default)
     {
         if (IsPeoplePlaygroundRunning(gameDirectory)) throw new InvalidOperationException("Close People Playground before restoring a backup.");
         await BackupLock.WaitAsync(cancellationToken);
@@ -92,7 +92,7 @@ public sealed class BackupService
                 using var input = entry.Open(); using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true); await input.CopyToAsync(output, cancellationToken); await output.FlushAsync(cancellationToken); output.Close();
                 if (new FileInfo(destination).Length != item.Length || !Hash(destination).Equals(item.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Backup hash validation failed: {item.Path}");
             }
-            var rollback = await CreateBackupCoreAsync(root, backupDirectory, 1, cancellationToken);
+            var rollback = await CreateBackupCoreAsync(root, backupDirectory, retentionCount, cancellationToken);
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -117,11 +117,10 @@ public sealed class BackupService
 
     private static string SafeArchivePath(string root, string entryName)
     {
-        var normalized = entryName.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar); if (Path.IsPathRooted(normalized)) throw new InvalidDataException("Backup contains an absolute path."); var destination = Path.GetFullPath(Path.Combine(root, normalized)); if (!IsWithin(root, destination)) throw new InvalidDataException("Backup contains a path traversal entry."); return destination;
+        var normalized = entryName.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar); if (Path.IsPathRooted(normalized)) throw new InvalidDataException("Backup contains an absolute path."); var destination = Path.GetFullPath(Path.Combine(root, normalized)); if (!SecurePathService.IsWithin(root, destination)) throw new InvalidDataException("Backup contains a path traversal entry."); return destination;
     }
     private static string ReadEntry(ZipArchiveEntry entry) { using var reader = new StreamReader(entry.Open(), Encoding.UTF8); return reader.ReadToEnd(); }
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
-    private static bool IsWithin(string root, string candidate) { var r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; var c = Path.GetFullPath(candidate); return c.StartsWith(r, StringComparison.OrdinalIgnoreCase); }
     private static bool IsPeoplePlaygroundRunning(string gameDirectory) { var executable = Path.GetFullPath(Path.Combine(gameDirectory, "People Playground.exe")); foreach (var process in Process.GetProcessesByName("People Playground")) { try { if (string.Equals(process.MainModule?.FileName, executable, StringComparison.OrdinalIgnoreCase)) return true; } catch { } finally { process.Dispose(); } } return false; }
     private static void Prune(string directory, int retentionCount) { foreach (var file in Directory.GetFiles(directory, "*.ppgbackup.zip").OrderByDescending(File.GetCreationTimeUtc).Skip(Math.Max(1, retentionCount))) { try { File.Delete(file); } catch { } } }
     private static string FormatSize(long bytes) { var units = new[] { "B", "KB", "MB", "GB" }; var size = (double)bytes; var unit = 0; while (size >= 1024 && unit < units.Length - 1) { size /= 1024; unit++; } return $"{size:0.0} {units[unit]}"; }

@@ -25,7 +25,7 @@ public sealed class QuarantineService
                 var source = SecurePathService.RequireExistingFile(finding.FilePath, "malware candidate");
                 if (finding.Scope is ScanScope.GameCore or ScanScope.Unknown) throw new UnauthorizedAccessException("Core or unscoped files are never quarantined.");
                 var hash = Hash(source); if (!string.IsNullOrWhiteSpace(finding.Sha256) && !hash.Equals(finding.Sha256, StringComparison.OrdinalIgnoreCase)) throw new IOException($"Malware candidate changed before quarantine: {source}");
-                var root = Path.GetFullPath(_root); if (IsWithin(Path.GetDirectoryName(source)!, root)) throw new UnauthorizedAccessException("Quarantine storage must not be inside the scanned content tree.");
+                var root = Path.GetFullPath(_root); if (SecurePathService.IsWithin(Path.GetDirectoryName(source)!, root)) throw new UnauthorizedAccessException("Quarantine storage must not be inside the scanned content tree.");
                 var destination = Path.Combine(root, DateTime.UtcNow.ToString("yyyyMMdd"), Guid.NewGuid().ToString("N") + "-" + Path.GetFileName(source));
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!); SecurePathService.RejectReparse(Path.GetDirectoryName(destination)!, "quarantine directory");
                 var info = new FileInfo(source); var record = new QuarantineRecord(source, destination, hash, info.Length, info.LastWriteTimeUtc, info.Attributes, string.Join(",", report.Findings.Where(x => string.Equals(x.FilePath, source, StringComparison.OrdinalIgnoreCase)).Select(x => x.Rule).Distinct()));
@@ -61,5 +61,4 @@ public sealed class QuarantineService
         try { File.WriteAllText(temp, JsonSerializer.Serialize(new QuarantineManifest("PPGAV", 1, DateTimeOffset.UtcNow, records), new JsonSerializerOptions { WriteIndented = true })); File.Move(temp, path); } finally { if (File.Exists(temp)) File.Delete(temp); }
     }
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
-    private static bool IsWithin(string root, string candidate) { var r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; return Path.GetFullPath(candidate).StartsWith(r, StringComparison.OrdinalIgnoreCase); }
 }

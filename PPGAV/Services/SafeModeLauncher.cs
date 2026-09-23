@@ -113,7 +113,7 @@ public sealed class SafeModeLauncher
             if (!entry.Moved) continue;
             try
             {
-                if (!Guid.TryParse(sessionId, out _) || !entry.Disabled.Equals(entry.Original + ".ppgav-disabled-" + sessionId, StringComparison.OrdinalIgnoreCase) || !allowedRoots.Any(root => !string.IsNullOrWhiteSpace(root) && IsWithin(root, entry.Original))) { errors.Add($"Refused an untrusted Safe Mode recovery path: {entry.Original}"); continue; }
+                if (!Guid.TryParse(sessionId, out _) || !entry.Disabled.Equals(entry.Original + ".ppgav-disabled-" + sessionId, StringComparison.OrdinalIgnoreCase) || !allowedRoots.Any(root => !string.IsNullOrWhiteSpace(root) && SecurePathService.IsWithin(root, entry.Original))) { errors.Add($"Refused an untrusted Safe Mode recovery path: {entry.Original}"); continue; }
                 SecurePathService.RejectReparse(entry.Disabled, "disabled mod directory");
                 if (Directory.Exists(entry.Original) || File.Exists(entry.Original)) { errors.Add($"Refused to overwrite an existing path: {entry.Original}"); continue; }
                 if (!Directory.Exists(entry.Disabled)) { errors.Add($"Missing PPGAV-owned disabled directory: {entry.Disabled}"); continue; }
@@ -132,7 +132,6 @@ public sealed class SafeModeLauncher
     }
 
     private static void TryDeleteManifest(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
-    private static bool IsWithin(string root, string candidate) { var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; return Path.GetFullPath(candidate).StartsWith(prefix, StringComparison.OrdinalIgnoreCase); }
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static IEnumerable<string> ModDirectories(string gameRoot)
     {

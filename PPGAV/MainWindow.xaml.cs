@@ -322,7 +322,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await _backup.RestoreAsync(selected.Path, _settings.GameDirectory, _settings.BackupDirectory, _appCancellation.Token);
+            await _backup.RestoreAsync(selected.Path, _settings.GameDirectory, _settings.BackupDirectory, _settings.BackupRetentionCount, _appCancellation.Token);
             MessageBox.Show(this, "The backup was restored.", "Restore backup", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
