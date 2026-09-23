@@ -1,0 +1,88 @@
+name: release-msi
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp on the release (e.g. 1.4.0)'
+        required: true
+        default: '1.4.0'
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          $parts = $version.Split('.')
+          while ($parts.Count -lt 4) { $parts += "0" }
+          $msiVersion = ($parts[0..3] -join '.')
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "msi_version=$msiVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Publish self-contained build
+        run: >
+          dotnet publish .\PPGAV\PPGAV.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -o .\publish
+
+      - name: Run smoke tests
+        run: |
+          dotnet build .\tests\PPGAV.SmokeTests.csproj -c Release -p:TreatWarningsAsErrors=true
+          .\tests\bin\Release\net10.0-windows\PPGAV.SmokeTests.exe
+
+      - name: Install WiX toolset
+        run: dotnet tool install --global wix --version 4.*
+
+      - name: Build MSI
+        run: |
+          mkdir output
+          wix build .\Installer\Package.wxs -arch x64 -d PublishDir=.\publish -d Version=${{ steps.version.outputs.msi_version }} -out .\output\PPGAV-${{ steps.version.outputs.version }}.msi
+
+      - name: Compute release digests
+        id: digest
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem .\output\*.msi | Select-Object -First 1
+          $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+          "$hash  $($msi.Name)" | Out-File -FilePath ".\output\$($msi.Name).sha256" -Encoding ascii
+          "msi_path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppgav-msi
+          path: output\*
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            output/*.msi
+            output/*.sha256
+          body: |
+            Unsigned CI build. This MSI is not code-signed; wire a signing step
+            with a protected certificate secret before distributing it as a
+            production release. SHA-256: ${{ steps.digest.outputs.sha256 }}
+          generate_release_notes: true
