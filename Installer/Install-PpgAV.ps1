@@ -13,10 +13,60 @@ param(
 $ErrorActionPreference = 'Stop'
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $project = Join-Path $sourceRoot 'PPGAV\PPGAV.csproj'
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$installRoot = [IO.Path]::GetPathRoot($InstallDir)
+if ($InstallDir.TrimEnd([IO.Path]::DirectorySeparatorChar).Equals($installRoot.TrimEnd([IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Refusing to install into a volume root.'
+}
+$InstallDir = $InstallDir.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $publishDir = Join-Path $InstallDir 'app'
 $target = Join-Path $publishDir 'PPGAV.exe'
+$uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PPGAV'
+$uninstallScript = Join-Path $InstallDir 'Uninstall-PpgAV.ps1'
+
+function Assert-NoReparsePath([string]$Path) {
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to install through a reparse point: $current"
+            }
+        }
+        $parent = [IO.Directory]::GetParent($current)
+        if (-not $parent) { break }
+        $current = $parent.FullName
+    }
+}
+
+Assert-NoReparsePath $InstallDir
+$registeredHere = $false
+if (Test-Path -LiteralPath $uninstallKey) {
+    $registration = Get-ItemProperty -LiteralPath $uninstallKey
+    $registeredLocation = [IO.Path]::GetFullPath([string]$registration.InstallLocation).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ([string]$registration.Publisher -ne 'PPGAV' -or [string]$registration.UninstallString -notmatch [regex]::Escape($uninstallScript)) {
+        throw 'The existing uninstall registration does not identify this PPGAV installer; refusing to overwrite it.'
+    }
+    if (-not $registeredLocation.Equals($InstallDir, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "PPGAV is already registered at '$registeredLocation'; uninstall that copy before installing to another location."
+    }
+    $registeredHere = $true
+}
+if ((Test-Path -LiteralPath $publishDir -PathType Container) -and -not $registeredHere -and
+    (Get-ChildItem -LiteralPath $publishDir -Force | Select-Object -First 1)) {
+    throw "The target app directory is nonempty but is not registered as this PPGAV install; refusing to overwrite its contents."
+}
+if ((Test-Path -LiteralPath $uninstallScript -PathType Leaf) -and -not $registeredHere) {
+    throw "An uninstall script already exists at '$uninstallScript' without a matching PPGAV install record; refusing to overwrite it."
+}
+$runningProcesses = Get-CimInstance Win32_Process -Filter "Name = 'PPGAV.exe'" -ErrorAction Stop
+if ($runningProcesses | Where-Object { -not $_.ExecutablePath }) { throw 'A PPGAV process path could not be verified; close PPGAV and retry without force-stopping it.' }
+$runningInstall = $runningProcesses | Where-Object { [IO.Path]::GetFullPath($_.ExecutablePath).Equals([IO.Path]::GetFullPath($target), [StringComparison]::OrdinalIgnoreCase) }
+if ($runningInstall) { throw 'Close PPGAV from the system tray before installing or updating it; no process was stopped.' }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $publishDir | Out-Null
+Assert-NoReparsePath $publishDir
+if (Test-Path -LiteralPath $target) { Assert-NoReparsePath $target }
 dotnet publish $project -c $Configuration -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $publishDir --nologo
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $target)) {
     throw "PPGAV publish failed."
@@ -43,6 +93,14 @@ if ($InstallSandboxie -and -not $SkipSandboxDependency -and -not (Test-Path (Joi
 
 function New-Shortcut([string]$Path, [string]$TargetPath, [string]$Arguments, [string]$Description) {
     $shell = New-Object -ComObject WScript.Shell
+    if (Test-Path -LiteralPath $Path) {
+        $existing = $shell.CreateShortcut($Path)
+        if ([IO.Path]::GetFullPath($existing.TargetPath) -ne [IO.Path]::GetFullPath($TargetPath) -or
+            $existing.Description -ne $Description -or $existing.Arguments -ne $Arguments -or
+            [IO.Path]::GetFullPath($existing.WorkingDirectory) -ne [IO.Path]::GetFullPath((Split-Path $TargetPath))) {
+            throw "Refusing to overwrite a non-PPGAV shortcut at $Path"
+        }
+    }
     $shortcut = $shell.CreateShortcut($Path)
     $shortcut.TargetPath = $TargetPath
     $shortcut.Arguments = $Arguments
@@ -57,27 +115,13 @@ New-Item -ItemType Directory -Force -Path $startupDir, $startMenuDir | Out-Null
 if ($EnableStartup) { New-Shortcut (Join-Path $startupDir 'PPGAV.lnk') $target '--startup' 'People Playground Antivirus Guard' }
 New-Shortcut (Join-Path $startMenuDir 'PPGAV.lnk') $target '' 'People Playground Antivirus Guard'
 
-$uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PPGAV'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-PpgAV.ps1') -Destination (Join-Path $InstallDir 'Uninstall-PpgAV.ps1') -Force
 New-Item -Path $uninstallKey -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name DisplayName -Value 'PPGAV · People Playground Antivirus Guard' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value '1.4.0' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $InstallDir -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name Publisher -Value 'PPGAV' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name UninstallString -Value "powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $InstallDir 'Uninstall-PpgAV.ps1')`"" -PropertyType String -Force | Out-Null
-
-$uninstaller = @'
-param([switch]$RemoveData)
-$ErrorActionPreference = 'Stop'
-$installDir = Split-Path $PSScriptRoot
-Get-Process -Name PPGAV -ErrorAction SilentlyContinue | Stop-Process -Force
-Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'PPGAV.lnk') -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'PPGAV\PPGAV.lnk') -Force -ErrorAction SilentlyContinue
-Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PPGAV' -Recurse -Force -ErrorAction SilentlyContinue
-try { Get-NetFirewallRule -DisplayName 'PPGAV Safe Mode *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop } catch { Write-Warning "PPGAV firewall cleanup failed: $($_.Exception.Message)" }
-if ($RemoveData) { Remove-Item (Join-Path $env:LOCALAPPDATA 'PPGAV') -Recurse -Force -ErrorAction SilentlyContinue }
-Write-Host 'PPGAV was uninstalled. User data was preserved unless -RemoveData was supplied.'
-'@
-Set-Content -Path (Join-Path $InstallDir 'Uninstall-PpgAV.ps1') -Value $uninstaller -Encoding UTF8
 
 if (-not $NoStart) {
     Start-Process -FilePath $target -ArgumentList '--startup'

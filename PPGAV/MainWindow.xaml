@@ -83,21 +83,21 @@
                 <StackPanel>
                     <TextBlock Text="SAFE" FontSize="12" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
                     <TextBlock x:Name="SafeCountText" Text="0" FontSize="31" FontWeight="Bold" Margin="0,5,0,0" />
-                    <TextBlock Text="clean files and scans" Foreground="{StaticResource TextMuted}" />
+                    <TextBlock Text="files without findings (complete scans only)" Foreground="{StaticResource TextMuted}" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="1" Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="8,0">
                 <StackPanel>
                     <TextBlock Text="SUSPICIOUS" FontSize="12" FontWeight="Bold" Foreground="{StaticResource SuspiciousBrush}" />
                     <TextBlock x:Name="SuspiciousCountText" Text="0" FontSize="31" FontWeight="Bold" Margin="0,5,0,0" />
-                    <TextBlock Text="needs review" Foreground="{StaticResource TextMuted}" />
+                    <TextBlock Text="findings needing review" Foreground="{StaticResource TextMuted}" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="2" Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="8,0,0,0">
                 <StackPanel>
                     <TextBlock Text="MALWARE" FontSize="12" FontWeight="Bold" Foreground="{StaticResource MalwareBrush}" />
                     <TextBlock x:Name="MalwareCountText" Text="0" FontSize="31" FontWeight="Bold" Margin="0,5,0,0" />
-                    <TextBlock Text="blocked or quarantined" Foreground="{StaticResource TextMuted}" />
+                    <TextBlock Text="malware-level findings" Foreground="{StaticResource TextMuted}" />
                 </StackPanel>
             </Border>
         </Grid>
@@ -113,13 +113,14 @@
                     <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,0,0,12">
                         <StackPanel>
                             <TextBlock Text="Launch controls" FontSize="17" FontWeight="Bold" />
-                            <TextBlock Text="Every launch is scanned first. Secure Sandbox is isolated from the host; Malware Safe Mode strips mods and blocks outbound traffic." Foreground="{StaticResource TextMuted}" TextWrapping="Wrap" Margin="0,4,0,16" />
+                            <TextBlock Text="Every launch is scanned first. Secure Sandbox uses a separate provider session; Malware Safe Mode disables Mods/Workshop and blocks outbound traffic for the game executable only." Foreground="{StaticResource TextMuted}" TextWrapping="Wrap" Margin="0,4,0,16" />
                             <WrapPanel>
                                 <Button x:Name="SecureLaunchButton" Content="Launch in Secure Sandbox" Style="{StaticResource AccentButton}" Click="SecureLaunch_Click" />
                                 <Button Content="Malware Safe Mode" Click="SafeLaunch_Click" />
                                 <Button Content="Stop game" Style="{StaticResource DangerButton}" Click="Stop_Click" />
                             </WrapPanel>
                             <TextBlock x:Name="LatestScanText" Text="No scan has run this session." Foreground="{StaticResource TextMuted}" Margin="0,14,0,0" />
+                            <ListBox x:Name="FindingsList" Height="150" Margin="0,8,0,0" />
                         </StackPanel>
                     </Border>
 
@@ -148,8 +149,7 @@
                                 <CheckBox x:Name="ScanBeforeLaunchBox" Content="Mandatory preflight scan" IsChecked="True" IsEnabled="False" />
                                 <CheckBox x:Name="WatchProcessBox" Content="Watch process behavior" />
                                 <CheckBox x:Name="UseWindowsSandboxBox" Content="Prefer Windows Sandbox" />
-                                <CheckBox x:Name="RequireNetworkBlockBox" Content="Require safe-mode network block" />
-                                <CheckBox x:Name="AutomaticUpdatesBox" Content="Automatically install verified updates" />
+                                <CheckBox x:Name="AutomaticUpdatesBox" Content="Automatically install GitHub-digest-checked updates" />
                             </WrapPanel>
                             <WrapPanel Margin="0,3,0,0">
                                 <TextBlock Text="Backup every" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" Margin="0,0,8,0" />
@@ -158,6 +158,8 @@
                                 <TextBox x:Name="BackupRetentionBox" Width="44" Margin="0,0,7,0" HorizontalContentAlignment="Center" />
                                 <TextBlock Text="backups" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" />
                             </WrapPanel>
+                            <TextBlock Text="Windows Sandbox files to persist (one relative path per line; only approved save/config extensions). Existing host files are backed up before replacement." Foreground="{StaticResource TextMuted}" TextWrapping="Wrap" Margin="0,8,0,2" />
+                            <TextBox x:Name="SandboxSavePathsBox" Height="70" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,4,0,4" />
                             <Button Content="Save settings" HorizontalAlignment="Left" Margin="0,12,0,0" Click="SaveSettings_Click" />
                         </StackPanel>
                     </Border>

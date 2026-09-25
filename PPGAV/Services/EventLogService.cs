@@ -10,15 +10,18 @@ public sealed class EventLogService
 {
     private readonly ObservableCollection<AppEvent> _events = [];
     private readonly object _gate = new();
+    private readonly string _eventLogFile;
 
-    public EventLogService()
+    public EventLogService(string? eventLogFile = null)
     {
-        AppPaths.EnsureDirectories();
+        _eventLogFile = eventLogFile is null ? AppPaths.EventLogFile : Path.GetFullPath(eventLogFile);
+        if (eventLogFile is null) AppPaths.EnsureDirectories();
+        else Directory.CreateDirectory(Path.GetDirectoryName(_eventLogFile)!);
         try
         {
-            if (File.Exists(AppPaths.EventLogFile))
+            if (File.Exists(_eventLogFile))
             {
-                foreach (var line in File.ReadLines(AppPaths.EventLogFile).TakeLast(100))
+                foreach (var line in File.ReadLines(_eventLogFile).TakeLast(100))
                 {
                     var item = JsonSerializer.Deserialize<AppEvent>(line);
                     if (item is not null) _events.Add(item);
@@ -43,7 +46,7 @@ public sealed class EventLogService
             while (_events.Count > 200) _events.RemoveAt(0);
             try
             {
-                File.AppendAllText(AppPaths.EventLogFile, JsonSerializer.Serialize(item) + Environment.NewLine);
+                File.AppendAllText(_eventLogFile, JsonSerializer.Serialize(item) + Environment.NewLine);
             }
             catch { }
         }

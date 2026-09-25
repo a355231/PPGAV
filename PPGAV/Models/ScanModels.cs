@@ -32,6 +32,8 @@ public sealed class ScanReport
     public List<ScanFinding> Findings { get; } = [];
     public List<string> Errors { get; } = [];
     public List<string> SkippedPaths { get; } = [];
+    public Dictionary<string, string> ScannedHashes { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> ScannedRoots { get; } = [];
     public long BytesInspected { get; set; }
     public bool IsComplete { get; set; }
     public bool Cancelled { get; set; }
@@ -57,4 +59,15 @@ public sealed record BehaviorAlert(
 
 public sealed record BackupInfo(string Path, DateTimeOffset CreatedAt, long SizeBytes);
 
-public sealed record DefenderScanResult(bool Started, int ExitCode, string ExecutablePath, string Output);
+public sealed record DefenderScanResult(bool Started, int ExitCode, string ExecutablePath, string Output,
+    bool StatusVerified = false, bool ThreatsDetected = true, bool ProtectionEnabled = false, bool SignaturesCurrent = false)
+{
+    public bool IsClean => Started && ExitCode == 0 && StatusVerified && !ThreatsDetected && ProtectionEnabled && SignaturesCurrent;
+
+    /// <summary>
+    /// True only when Defender positively reported a threat (MpCmdRun exit code 2, or a verified
+    /// active-threat record). <see cref="ThreatsDetected"/> defaults to true for fail-closed
+    /// <see cref="IsClean"/> checks and must not be reported to the user as a detection.
+    /// </summary>
+    public bool ThreatConfirmed => Started && (ExitCode == 2 || StatusVerified && ThreatsDetected);
+}

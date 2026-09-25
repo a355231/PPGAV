@@ -11,8 +11,15 @@ public static class AppPaths
 
     public static void EnsureDirectories()
     {
-        Directory.CreateDirectory(Root);
-        Directory.CreateDirectory(SandboxFolder);
-        Directory.CreateDirectory(RestoreSafetyFolder);
+        EnsureOwnedDirectory(Root, null);
+        EnsureOwnedDirectory(SandboxFolder, Root);
+        EnsureOwnedDirectory(RestoreSafetyFolder, Root);
+    }
+
+    private static void EnsureOwnedDirectory(string path, string? parent)
+    {
+        if (!Directory.Exists(path)) Directory.CreateDirectory(path);
+        if (parent is null) SecurePathService.RequireExistingDirectory(path, "PPGAV application data directory");
+        else SecurePathService.RequireContained(parent, path, true, "PPGAV application data subdirectory");
     }
 }

@@ -18,7 +18,10 @@ public sealed class SettingsService
         {
             if (File.Exists(AppPaths.SettingsFile))
             {
-                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(AppPaths.SettingsFile), JsonOptions) ?? CreateDefaults();
+                using var input = SecurePathService.OpenContainedRead(AppPaths.Root, AppPaths.SettingsFile, "PPGAV settings file");
+                if (input.Length > 1024 * 1024) throw new InvalidDataException("Settings exceed the configured size limit.");
+                using var reader = new StreamReader(input);
+                var settings = JsonSerializer.Deserialize<AppSettings>(reader.ReadToEnd(), JsonOptions) ?? CreateDefaults();
                 settings.Normalize();
                 return settings;
             }
@@ -35,9 +38,14 @@ public sealed class SettingsService
     {
         settings.Normalize();
         AppPaths.EnsureDirectories();
-        var temporary = AppPaths.SettingsFile + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
-        File.Move(temporary, AppPaths.SettingsFile, true);
+        var temporary = AppPaths.SettingsFile + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 16384, FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(output)) { writer.Write(JsonSerializer.Serialize(settings, JsonOptions)); writer.Flush(); output.Flush(true); }
+            SecurePathService.MoveFileContained(AppPaths.Root, temporary, AppPaths.SettingsFile, true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     private static AppSettings CreateDefaults()

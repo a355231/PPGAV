@@ -2,7 +2,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="PPGAV - People Playground Antivirus Guard"
            Manufacturer="PPGAV"
-           Version="1.4.0.0"
+           Version="1.5.0.0"
            UpgradeCode="A8D6F6C1-8A3D-4A6B-8B5A-4A9C5F7B31D2"
            Scope="perUser">
     <SummaryInformation Description="People Playground Antivirus Guard" />
@@ -27,7 +27,6 @@
     <Component Id="ApplicationComponent" Directory="InstallFolder" Guid="6A2B0DF0-52D4-4DAE-9D53-20A8A2E9F7C4">
       <File Id="PPGAVEXE" Source="$(var.PublishDir)\PPGAV.exe" />
       <RegistryValue Root="HKCU" Key="Software\PPGAV" Name="InstallMarker" Type="string" Value="1" KeyPath="yes" />
-      <RemoveFile Id="RemovePublishedAppFiles" Name="*" On="uninstall" />
       <RemoveFolder Id="RemoveAppDirectory" On="uninstall" />
     </Component>
 

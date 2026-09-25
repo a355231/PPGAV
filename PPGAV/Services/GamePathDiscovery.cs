@@ -48,12 +48,25 @@ public static class GamePathDiscovery
 
     private static IEnumerable<string> EnumerateSteamRoots()
     {
-        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        var pending = new Queue<string>();
+        var queued = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddRoot(string? root)
+        {
+            if (string.IsNullOrWhiteSpace(root)) return;
+            try
+            {
+                var full = Path.GetFullPath(root.Trim().Trim('"'));
+                if (Path.IsPathRooted(full) && queued.Add(full)) pending.Enqueue(full);
+            }
+            catch { }
+        }
+
+        foreach (var root in new[]
         {
             @"C:\Program Files (x86)\Steam",
             @"C:\Program Files\Steam",
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Steam")
-        };
+        }) AddRoot(root);
 
         foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
         {
@@ -64,10 +77,7 @@ public static class GamePathDiscovery
                     using var baseKey = RegistryKey.OpenBaseKey(hive, view);
                     using var key = baseKey.OpenSubKey(@"SOFTWARE\Valve\Steam");
                     var installPath = key?.GetValue("InstallPath") as string;
-                    if (!string.IsNullOrWhiteSpace(installPath))
-                    {
-                        roots.Add(installPath);
-                    }
+                    AddRoot(installPath);
                 }
                 catch
                 {
@@ -76,28 +86,31 @@ public static class GamePathDiscovery
             }
         }
 
-        foreach (var root in roots.Where(Directory.Exists))
+        var discovered = 0;
+        while (pending.Count > 0 && discovered < 32)
         {
+            var root = pending.Dequeue();
+            if (!Directory.Exists(root)) continue;
+            discovered++;
             yield return root;
 
             var libraryFile = Path.Combine(root, "steamapps", "libraryfolders.vdf");
-            if (!File.Exists(libraryFile))
+            try
             {
-                continue;
-            }
-
-            string text;
-            try { text = File.ReadAllText(libraryFile); }
-            catch { continue; }
-
-            foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(text, @"""path""\s+""(?<path>[^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-            {
-                var path = match.Groups["path"].Value.Replace("\\\\", "\\");
-                if (!string.IsNullOrWhiteSpace(path))
+                var info = new FileInfo(libraryFile);
+                if (!info.Exists || info.Length <= 0 || info.Length > 2 * 1024 * 1024) continue;
+                var text = File.ReadAllText(libraryFile);
+                foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                             text,
+                             @"""path""\s+""(?<path>[^""]+)""",
+                             System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+                             TimeSpan.FromMilliseconds(250)))
                 {
-                    roots.Add(path);
+                    AddRoot(match.Groups["path"].Value.Replace("\\\\", "\\"));
+                    if (queued.Count >= 32) break;
                 }
             }
+            catch { /* Steam discovery is optional; one malformed/inaccessible library must not abort startup. */ }
         }
     }
 }

@@ -4,11 +4,12 @@ namespace PPGAV.Services;
 
 public static class PreflightDecisionEngine
 {
-    public static PreflightAction Decide(ScanReport report, bool defenderClean = true)
+    public static PreflightAction Decide(ScanReport report, bool defenderClean = false)
     {
-        if (!defenderClean || !string.IsNullOrEmpty(report.RootPath) && (!report.IsComplete || report.Errors.Count > 0 || report.SkippedPaths.Count > 0) || report.HasCoreFinding && report.Findings.Count > 0)
+        if (!defenderClean || !report.IsComplete || report.Errors.Count > 0 || report.SkippedPaths.Count > 0 ||
+            report.Findings.Any(f => f.Scope is ScanScope.GameCore or ScanScope.Unknown))
             return PreflightAction.BlockAll;
-        return report.Findings.Count > 0 ? PreflightAction.LaunchSafeMode : PreflightAction.AllowSecure;
+        return report.Findings.Any(f => f.Category != ScanCategory.Safe) ? PreflightAction.LaunchSafeMode : PreflightAction.AllowSecure;
     }
 }
 

@@ -12,8 +12,7 @@ public sealed class AppSettings
     public bool ScanBeforeLaunch { get; set; } = true;
     public bool WatchProcess { get; set; } = true;
     public bool UseWindowsSandbox { get; set; } = true;
-    public bool RequireNetworkBlockInSafeMode { get; set; } = true;
-    public bool AutomaticUpdates { get; set; } = true;
+    public bool AutomaticUpdates { get; set; }
     public int UpdateCheckIntervalHours { get; set; } = 6;
     public List<string> SandboxSavePaths { get; set; } = [];
 
