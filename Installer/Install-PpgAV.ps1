@@ -13,6 +13,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $project = Join-Path $sourceRoot 'PPGAV\PPGAV.csproj'
+# The registered version comes from the project so Add/Remove Programs cannot drift from the built application.
+$appVersion = [regex]::Match((Get-Content -LiteralPath $project -Raw), '<Version>([^<]+)</Version>').Groups[1].Value
+if (-not $appVersion) { throw 'Could not read the PPGAV version from the project file.' }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $installRoot = [IO.Path]::GetPathRoot($InstallDir)
 if ($InstallDir.TrimEnd([IO.Path]::DirectorySeparatorChar).Equals($installRoot.TrimEnd([IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
@@ -118,7 +121,7 @@ New-Shortcut (Join-Path $startMenuDir 'PPGAV.lnk') $target '' 'People Playground
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-PpgAV.ps1') -Destination (Join-Path $InstallDir 'Uninstall-PpgAV.ps1') -Force
 New-Item -Path $uninstallKey -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name DisplayName -Value 'PPGAV · People Playground Antivirus Guard' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value '1.4.0' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value $appVersion -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $InstallDir -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name Publisher -Value 'PPGAV' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name UninstallString -Value "powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $InstallDir 'Uninstall-PpgAV.ps1')`"" -PropertyType String -Force | Out-Null

@@ -41,6 +41,7 @@ internal static class AmsiScanner
     // AMSI is designed to be initialized once per application; re-initializing the provider for every
     // buffer dominated preflight time on real installs and pushed scans past their deadline.
     private static IntPtr _context;
+    private const uint AmsiResultBlockedByAdminStart = 16384;
 
     private static bool ScanCore(byte[] content, string contentName)
     {
@@ -51,7 +52,9 @@ internal static class AmsiScanner
         }
         var hr = AmsiScanBuffer(_context, content, (uint)content.Length, contentName, IntPtr.Zero, out var result);
         if (hr != 0) throw new InvalidOperationException($"AMSI scan failed with HRESULT 0x{hr:X8}.");
-        return result >= 32768;
+        // AMSI_RESULT_BLOCKED_BY_ADMIN_START (16384) through the detected range are verdicts that the content must
+        // not run, so they count as blocked. Only CLEAN (0) and NOT_DETECTED (1) are passing results.
+        return result >= AmsiResultBlockedByAdminStart;
     }
 
     [DllImport("amsi.dll", CharSet = CharSet.Unicode)] private static extern int AmsiInitialize(string appName, out IntPtr context);

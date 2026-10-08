@@ -159,8 +159,13 @@ public sealed class BackupService
             var rollback = await CreateBackupCoreAsync(root, rollbackDirectory, 100, cancellationToken);
             var rollbackManifest = ReadAndValidateManifest(rollback.Path);
             var rollbackFiles = rollbackManifest.Files.ToDictionary(x => x.Path, x => x.Sha256, StringComparer.OrdinalIgnoreCase);
+            // A restore makes the game directory match the backup. Files that exist only now (for example a mod
+            // dropped in after the backup) are removed; the rollback archive above keeps them recoverable.
+            var backupPaths = manifest.Files.Select(x => x.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var addedSinceBackup = rollbackFiles.Where(x => !backupPaths.Contains(x.Key))
+                .ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
 
-            try { await RestoreArchiveContentsAsync(archivePath, root, cancellationToken); }
+            try { await RestoreArchiveContentsAsync(archivePath, root, cancellationToken, addedSinceBackup); }
             catch (Exception restoreError)
             {
                 try
