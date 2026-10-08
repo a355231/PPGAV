@@ -8,6 +8,7 @@ public sealed record AppEvent(DateTimeOffset Timestamp, ScanCategory Category, s
 
 public sealed class EventLogService
 {
+    private const long MaximumLogBytes = 5L * 1024 * 1024;
     private readonly ObservableCollection<AppEvent> _events = [];
     private readonly object _gate = new();
     private readonly string _eventLogFile;
@@ -46,11 +47,22 @@ public sealed class EventLogService
             while (_events.Count > 200) _events.RemoveAt(0);
             try
             {
+                RotateIfLarge();
                 File.AppendAllText(_eventLogFile, JsonSerializer.Serialize(item) + Environment.NewLine);
             }
             catch { }
         }
 
         EventAdded?.Invoke(this, item);
+    }
+
+    /// <summary>
+    /// Keeps one previous generation so the log cannot grow without bound. The file is read in full at every
+    /// startup, and a long-running tray process with frequent watcher events would otherwise make that slow.
+    /// </summary>
+    private void RotateIfLarge()
+    {
+        var info = new FileInfo(_eventLogFile);
+        if (info.Exists && info.Length > MaximumLogBytes) File.Move(_eventLogFile, _eventLogFile + ".1", overwrite: true);
     }
 }

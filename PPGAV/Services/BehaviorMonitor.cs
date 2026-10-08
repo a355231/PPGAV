@@ -12,6 +12,8 @@ public sealed class BehaviorMonitor
     {
         "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe", "bitsadmin.exe", "certutil.exe"
     };
+    // Writes to one path that arrive within this window are inspected together, after the window closes.
+    private static readonly TimeSpan WatcherQuietPeriod = TimeSpan.FromMilliseconds(300);
     private readonly EventLogService _events;
     private readonly ScannerService _scanner;
 
@@ -37,9 +39,9 @@ public sealed class BehaviorMonitor
             Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Guest process monitoring limitation", "Windows Sandbox guest processes are not visible to this host-side monitor; network denial and disposable staging are enforced by the sandbox provider.", false));
         try
         {
-            watchers.Add(CreateWatcher(watchRoot, ScanScope.GameCore, onAlert));
+            watchers.Add(CreateWatcher(watchRoot, ScanScope.GameCore, onAlert, cancellationToken));
             if (session.Provider != SandboxProvider.WindowsSandbox)
-                foreach (var root in additionalRoots ?? []) if (Directory.Exists(root)) watchers.Add(CreateWatcher(root, ScanScope.SteamWorkshop, onAlert));
+                foreach (var root in additionalRoots ?? []) if (Directory.Exists(root)) watchers.Add(CreateWatcher(root, ScanScope.SteamWorkshop, onAlert, cancellationToken));
             bool InspectModules(Process inspected)
             {
                 try
@@ -76,6 +78,17 @@ public sealed class BehaviorMonitor
                 {
                     ProcessTree.KillObservedChildren(session.Process.Id, rootStartTimeUtc, rootPath, lastObservedChildren.Values);
                     return;
+                }
+                // Endpoints are read before the process tree. A child that opens a socket after the tree was read
+                // would otherwise be unknown for this tick, and a short-lived child could exit before the next one.
+                IReadOnlyList<NetworkEndpoint> endpoints = [];
+                if (session.Provider != SandboxProvider.WindowsSandbox)
+                {
+                    if (!NetworkActivityMonitor.TrySnapshot(out endpoints, out var networkError))
+                    {
+                        Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Network monitor failed", $"Network activity could not be observed: {networkError}", true));
+                        ProcessTree.KillTree(session.Process); return;
+                    }
                 }
                 var descendants = session.Provider == SandboxProvider.WindowsSandbox ? [] : ProcessTree.Descendants(session.Process);
                 foreach (var child in descendants)
@@ -119,15 +132,6 @@ public sealed class BehaviorMonitor
                         }
                     }
                 }
-                IReadOnlyList<NetworkEndpoint> endpoints = [];
-                if (session.Provider != SandboxProvider.WindowsSandbox)
-                {
-                    if (!NetworkActivityMonitor.TrySnapshot(out endpoints, out var networkError))
-                    {
-                        Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Network monitor failed", $"Network activity could not be observed: {networkError}", true));
-                        ProcessTree.KillTree(session.Process); return;
-                    }
-                }
                 foreach (var endpoint in endpoints)
                 {
                     if (endpoint.ProcessId == session.Process.Id)
@@ -153,29 +157,58 @@ public sealed class BehaviorMonitor
         finally { foreach (var watcher in watchers) watcher.Dispose(); }
     }
 
-    private FileSystemWatcher CreateWatcher(string root, ScanScope scope, Action<BehaviorAlert> onAlert)
+    private FileSystemWatcher CreateWatcher(string root, ScanScope scope, Action<BehaviorAlert> onAlert, CancellationToken cancellationToken)
     {
         SecurePathService.RequireExistingDirectory(root, "behavior monitor root");
         var watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size, Filter = "*.*", EnableRaisingEvents = true, InternalBufferSize = 64 * 1024 };
-        var recent = new ConcurrentDictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
-        FileSystemEventHandler handler = (_, args) =>
+        // At most one inspection per path is queued. An event for a path that is already queued is absorbed, but the
+        // queued inspection only starts after the path is dequeued, so it reads content written before that point.
+        // Every event therefore leads to an inspection that starts after it; a burst of writes is never left unscanned.
+        var queued = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        void Queue(string fullPath, bool expandDirectories)
+        {
+            if (cancellationToken.IsCancellationRequested || !queued.TryAdd(fullPath, 0)) return;
+            _ = Task.Run(async () =>
+            {
+                try { await Task.Delay(WatcherQuietPeriod, cancellationToken); }
+                catch (OperationCanceledException) { return; }
+                queued.TryRemove(fullPath, out _);
+                if (cancellationToken.IsCancellationRequested) return;
+                if (Directory.Exists(fullPath))
+                {
+                    if (expandDirectories) QueueDirectoryContents(fullPath);
+                    return;
+                }
+                Inspect(fullPath);
+            });
+        }
+
+        void QueueDirectoryContents(string directory)
+        {
+            // A directory moved or copied into the tree raises an event for the directory itself, not for its files.
+            try { foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)) Queue(file, expandDirectories: false); }
+            catch (Exception ex) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher inspection incomplete", $"Could not enumerate changed directory {directory}: {ex.Message}", true)); }
+        }
+
+        void Inspect(string fullPath)
         {
             try
             {
-                if (recent.TryGetValue(args.FullPath, out var last) && DateTimeOffset.UtcNow - last < TimeSpan.FromMilliseconds(300)) return;
-                if (recent.Count > 10000) recent.Clear();
-                recent[args.FullPath] = DateTimeOffset.UtcNow;
-                if (Directory.Exists(args.FullPath)) return;
-                var effectiveScope = scope == ScanScope.GameCore ? GameLayout.ScopeFor(root, args.FullPath) : scope;
-                var report = _scanner.ScanFile(args.FullPath, effectiveScope, scope == ScanScope.GameCore && GameLayout.IsCompiledModCache(root, args.FullPath));
-                if (!report.IsComplete) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher inspection incomplete", $"Changed content could not be completely inspected: {args.FullPath}", true)); return; }
+                var effectiveScope = scope == ScanScope.GameCore ? GameLayout.ScopeFor(root, fullPath) : scope;
+                var report = _scanner.ScanFile(fullPath, effectiveScope, scope == ScanScope.GameCore && GameLayout.IsCompiledModCache(root, fullPath), scope == ScanScope.GameCore ? root : null);
+                if (!report.IsComplete) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher inspection incomplete", $"Changed content could not be completely inspected: {fullPath}", true)); return; }
                 foreach (var finding in report.Findings.Where(x => x.Category != ScanCategory.Safe)) Alert(onAlert, new BehaviorAlert(finding.Category, "Changed content detected", $"{finding.FilePath}: {finding.Rule}", finding.Category == ScanCategory.Malware));
             }
             catch (Exception ex) { Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher failure", ex.Message, true)); }
-        };
+        }
+
         watcher.Error += (_, args) => Alert(onAlert, new BehaviorAlert(ScanCategory.Suspicious, "Watcher overflow", args.GetException().Message, true));
-        watcher.Created += handler; watcher.Changed += handler;
-        watcher.Renamed += (_, args) => handler(watcher, new FileSystemEventArgs(WatcherChangeTypes.Renamed, Path.GetDirectoryName(args.FullPath) ?? root, Path.GetFileName(args.FullPath)));
+        // Only created or renamed directories bring unseen content, so only those expand. A changed directory
+        // raises an event whenever one of its children is written, and expanding it would rescan the whole tree.
+        watcher.Created += (_, args) => Queue(args.FullPath, expandDirectories: true);
+        watcher.Changed += (_, args) => Queue(args.FullPath, expandDirectories: false);
+        watcher.Renamed += (_, args) => Queue(args.FullPath, expandDirectories: true);
         return watcher;
     }
 

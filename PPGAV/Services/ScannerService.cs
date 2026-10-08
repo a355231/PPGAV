@@ -19,6 +19,7 @@ public sealed class ScannerService
     private const long MaxArchiveExpansionBytes = 512L * 1024 * 1024;
     private const int MaxFiles = 250_000;
     private const int MaxArchiveEntries = 4096;
+    private const long MaxTotalArchiveEntries = 200_000;
     private static readonly TimeSpan MaxScanDuration = TimeSpan.FromMinutes(2);
     private sealed record Rule(string Name, Regex Pattern, int Score, string Detail);
     // Inputs can be up to 32 MB; 100 ms timed out on ordinary large mod files and failed the whole scan.
@@ -53,6 +54,7 @@ public sealed class ScannerService
     {
         public long TotalBytes;
         public long ExpandedBytes;
+        public long ArchiveEntries;
         public int FileCount;
         public void Check()
         {
@@ -77,11 +79,12 @@ public sealed class ScannerService
     /// used so the scan never fails (or blocks the game) on a file the game holds open, and a file
     /// that was deleted before inspection has nothing left to load, so it is not an error.
     /// </summary>
-    public ScanReport ScanFile(string filePath, ScanScope scope = ScanScope.Unknown, bool compiledModCache = false)
+    public ScanReport ScanFile(string filePath, ScanScope scope = ScanScope.Unknown, bool compiledModCache = false, string? gameRoot = null)
     {
         var report = NewReport(filePath);
         var budget = new ScanBudget(CancellationToken.None, DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30));
-        if (File.Exists(filePath)) { report.FilesInspected++; InspectFile(filePath, scope, report, budget, FileShare.ReadWrite | FileShare.Delete, compiledModCache); }
+        var runtimeData = gameRoot is not null && scope == ScanScope.GameCore && GameLayout.IsRuntimeData(gameRoot, filePath);
+        if (File.Exists(filePath)) { report.FilesInspected++; InspectFile(filePath, scope, report, budget, FileShare.ReadWrite | FileShare.Delete, compiledModCache, runtimeData); }
         CorrelateCrossFileCapabilities(report);
         Finish(report);
         return report;
@@ -107,7 +110,9 @@ public sealed class ScannerService
                     if (++budget.FileCount > MaxFiles) throw new ScanLimitException("The maximum file-count limit was reached before inspection completed.");
                     report.FilesInspected++;
                     var scope = forcedScope == ScanScope.SteamWorkshop ? forcedScope : GameLayout.ScopeFor(safeRoot, file);
-                    InspectFile(file, scope, report, budget, compiledModCache: forcedScope != ScanScope.SteamWorkshop && GameLayout.IsCompiledModCache(safeRoot, file));
+                    InspectFile(file, scope, report, budget,
+                        compiledModCache: forcedScope != ScanScope.SteamWorkshop && GameLayout.IsCompiledModCache(safeRoot, file),
+                        runtimeData: forcedScope == ScanScope.GameCore && GameLayout.IsRuntimeData(safeRoot, file));
                 }
             }
         }
@@ -263,7 +268,7 @@ public sealed class ScannerService
         }
     }
 
-    private static void InspectFile(string file, ScanScope scope, ScanReport report, ScanBudget budget, FileShare share = FileShare.Read, bool compiledModCache = false)
+    private static void InspectFile(string file, ScanScope scope, ScanReport report, ScanBudget budget, FileShare share = FileShare.Read, bool compiledModCache = false, bool runtimeData = false)
     {
         try
         {
@@ -271,14 +276,24 @@ public sealed class ScannerService
             using var stream = SecurePathService.OpenContainedRead(Path.GetDirectoryName(file)!, file, "scan file", share);
             var length = stream.Length;
             if (length > MaxSingleFileBytes) throw new ScanLimitException($"File is larger than the per-file inspection limit ({MaxSingleFileBytes} bytes).");
-            var hash = HashBounded(stream, budget);
+            // Inspectable files are read once and hashed over the exact bytes that are analyzed, so the recorded
+            // hash, the verdict, and the later quarantine/launch re-verification all refer to the same content.
+            // Hashing and then re-reading the stream charged the byte budget twice for every file.
+            byte[]? contentBytes = null;
+            string hash;
+            if (length > MaxInspectableFileBytes) hash = HashBounded(stream, budget);
+            else
+            {
+                contentBytes = ReadBounded(stream, checked((int)MaxInspectableFileBytes), budget);
+                hash = Convert.ToHexString(SHA256.HashData(contentBytes));
+            }
             report.ScannedHashes[Path.GetFullPath(file)] = hash;
             if (KnownMalware.IsMatch(Path.GetFileName(file)))
             {
                 Add(report, ScanCategory.Malware, file, "known-ppg-malware-name", "Matches a known PPG malware family.", hash, scope, 100, DetectionKind.Confirmed);
                 return;
             }
-            if (length > MaxInspectableFileBytes)
+            if (contentBytes is null)
             {
                 // Large vendor assets (e.g. sharedassets*.resS) are pinned by the approved integrity baseline
                 // and covered by the Defender preflight scan; treating them as uninspected blocked every launch.
@@ -288,9 +303,7 @@ public sealed class ScannerService
                 return;
             }
 
-            stream.Position = 0;
-            var contentBytes = ReadBounded(stream, checked((int)MaxInspectableFileBytes), budget);
-            InspectContent(contentBytes, Path.GetFileName(file), file, scope, hash, report, compiledModCache);
+            InspectContent(contentBytes, Path.GetFileName(file), file, scope, hash, report, compiledModCache, runtimeData);
             if (file.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) InspectArchive(contentBytes, file, scope, hash, report, budget);
         }
         catch (Exception ex)
@@ -320,7 +333,7 @@ public sealed class ScannerService
         return memory.ToArray();
     }
 
-    private static void InspectContent(byte[] bytes, string entryName, string displayPath, ScanScope scope, string hash, ScanReport report, bool compiledModCache = false)
+    private static void InspectContent(byte[] bytes, string entryName, string displayPath, ScanScope scope, string hash, ScanReport report, bool compiledModCache = false, bool runtimeData = false)
     {
         var extension = Path.GetExtension(entryName);
         var isText = TextExtensions.Contains(extension);
@@ -330,6 +343,10 @@ public sealed class ScannerService
         // baseline, known-malware markers, AMSI, and Defender instead.
         if (scope == ScanScope.GameCore)
         {
+            // Settings, saves, logs and temp folders are excluded from the baseline, so code placed there would
+            // otherwise only meet AMSI and the known-marker check. Game-written data never contains executables.
+            if (runtimeData && (PayloadExtensions.Contains(extension) || IsPortableExecutable(bytes)))
+                Add(report, ScanCategory.Suspicious, displayPath, "executable-in-runtime-data", "Executable or script code was found in game-written runtime data (settings, saves, logs, or temporary folders), where no legitimate file should be code. Core-scope findings block launch; the file is not treated as confirmed malware.", hash, scope, 70, DetectionKind.Heuristic);
             if (!TryAmsi(bytes, displayPath, hash, scope, report)) return;
             var coreText = isText ? DecodeText(bytes) : ExtractStrings(bytes);
             if (KnownMalware.IsMatch(coreText))
@@ -418,18 +435,21 @@ public sealed class ScannerService
         {
             using var stream = new MemoryStream(archiveBytes, writable: false);
             using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            InspectArchiveEntries(zip, file, scope, hash, report, budget, 0, seen);
+            InspectArchiveEntries(zip, file, scope, hash, report, budget, 0);
         }
         catch (InvalidDataException) { Add(report, ScanCategory.Suspicious, file, "invalid-archive", "Archive is malformed or unreadable.", hash, scope, 60); }
         catch (ScanLimitException ex) { report.Errors.Add($"Archive inspection was incomplete for {file}: {ex.Message}"); report.SkippedPaths.Add(file); }
     }
 
-    private static void InspectArchiveEntries(ZipArchive zip, string file, ScanScope scope, string hash, ScanReport report, ScanBudget budget, int depth, HashSet<string> seen)
+    private static void InspectArchiveEntries(ZipArchive zip, string file, ScanScope scope, string hash, ScanReport report, ScanBudget budget, int depth)
     {
         if (depth >= 3) throw new ScanLimitException($"Nested archive depth exceeded the limit: {file}");
-        if (zip.Entries.Count > MaxArchiveEntries || zip.Entries.Count + seen.Count > MaxArchiveEntries)
-            throw new ScanLimitException($"Archive entry count exceeded the limit: {file}");
+        if (zip.Entries.Count > MaxArchiveEntries) throw new ScanLimitException($"Archive entry count exceeded the limit: {file}");
+        if (Interlocked.Add(ref budget.ArchiveEntries, zip.Entries.Count) > MaxTotalArchiveEntries)
+            throw new ScanLimitException("The total archive entry limit was reached before inspection completed.");
+        // Repeated names are only suspicious within one archive. Nested archives (for example a Workshop
+        // item's bundled "Info.json" in two packages) legitimately reuse entry names, so each archive gets its own set.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in zip.Entries)
         {
             budget.Check();
@@ -453,7 +473,7 @@ public sealed class ScannerService
             {
                 using var nestedMemory = new MemoryStream(data, writable: false);
                 using var nested = new ZipArchive(nestedMemory, ZipArchiveMode.Read);
-                InspectArchiveEntries(nested, display, scope, hash, report, budget, depth + 1, seen);
+                InspectArchiveEntries(nested, display, scope, hash, report, budget, depth + 1);
             }
         }
     }

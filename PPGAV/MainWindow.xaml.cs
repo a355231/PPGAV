@@ -44,6 +44,9 @@ public partial class MainWindow : Window
     private bool _allowClose;
     private bool _lastPreflightVerified;
     private long _nextUiOperationId;
+    // Backups and restores read or rewrite the game folder. Launch preflight and Safe Mode staging must not run during
+    // them, so a count of active operations is kept on the UI thread, which also owns launch starts.
+    private int _gameFileOperations;
 
     public MainWindow(
         SettingsService settingsService,
@@ -224,6 +227,11 @@ public partial class MainWindow : Window
 
     private async Task RunLaunchOperationAsync(Func<Task> launch)
     {
+        if (_gameFileOperations > 0)
+        {
+            MessageBox.Show(this, "A backup or restore is using the game folder. Launch after it finishes.", "PPGAV", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         if (_launchTask is { IsCompleted: false } || _session is not null)
         {
             MessageBox.Show(this, "A People Playground launch or session is already active.", "PPGAV", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -342,13 +350,17 @@ public partial class MainWindow : Window
         _lastReport = report;
         ApplyReport(report);
         SetStatus("Defender preflight", SuspiciousBrushKey());
-        var defender = await _defender.RunFullScanAsync(_settings.GameDirectory, _appCancellation.Token);
-        var defenderClean = defender.IsClean;
+        // Defender covers the game folder and every Steam Workshop root. Workshop content in another Steam library
+        // lies outside the game folder, so a game-folder scan alone would leave it unscanned.
+        var defenderTargets = new[] { _settings.GameDirectory }.Concat(GamePathDiscovery.FindWorkshopDirectories(_settings.GameDirectory)).ToArray();
+        var defenderResults = new List<(string Target, DefenderScanResult Result)>();
+        foreach (var target in defenderTargets) defenderResults.Add((target, await _defender.RunFullScanAsync(target, _appCancellation.Token)));
+        var defenderClean = defenderResults.All(x => x.Result.IsClean);
         if (!defenderClean)
         {
-            var threatDetected = defender.ThreatConfirmed;
+            var threatDetected = defenderResults.Any(x => x.Result.ThreatConfirmed);
             report.Findings.Add(new ScanFinding(threatDetected ? ScanCategory.Malware : ScanCategory.Suspicious,
-                _settings.GameDirectory, threatDetected ? "defender-threat-active" : "defender-state-unverified",
+                defenderResults.First(x => !x.Result.IsClean).Target, threatDetected ? "defender-threat-active" : "defender-state-unverified",
                 threatDetected ? "Microsoft Defender reported an active threat." : "A completed Defender scan with enabled protection, current signatures, and no active threats could not be verified.",
                 string.Empty, ScanScope.Unknown, 100, threatDetected ? DetectionKind.Confirmed : DetectionKind.Heuristic));
         }
@@ -405,7 +417,7 @@ public partial class MainWindow : Window
             }
             return decision;
         }
-        _lastPreflightVerified = decision == PreflightAction.AllowSecure && _integrity.LastStatus == IntegrityBaselineStatus.Valid && defender.IsClean;
+        _lastPreflightVerified = decision == PreflightAction.AllowSecure && _integrity.LastStatus == IntegrityBaselineStatus.Valid && defenderClean;
         return decision;
     }
 
@@ -503,7 +515,9 @@ public partial class MainWindow : Window
             if (_launchTask is not null || _session is not null) throw new InvalidOperationException("A game launch/session is active; create the backup after it ends.");
             SaveSettingsFromControls();
             SetStatus("Creating backup", AccentBrushKey());
-            await _backup.CreateBackupAsync(_settings.GameDirectory, _settings.BackupDirectory, _settings.BackupRetentionCount, _appCancellation.Token);
+            _gameFileOperations++;
+            try { await _backup.CreateBackupAsync(_settings.GameDirectory, _settings.BackupDirectory, _settings.BackupRetentionCount, _appCancellation.Token); }
+            finally { _gameFileOperations--; }
             RefreshBackups();
             SetStatus("Backup complete", AccentBrushKey());
         }
@@ -530,12 +544,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        var answer = MessageBox.Show(this, $"Restore {Path.GetFileName(selected.Path)} into the configured game directory? Close People Playground first. Existing files may be overwritten.", "Restore backup", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        var answer = MessageBox.Show(this, $"Restore {Path.GetFileName(selected.Path)} into the configured game directory? Close People Playground first. Files that differ from the backup are overwritten, and files that are not in the backup are removed. The current state is first saved to a rollback archive.", "Restore backup", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (answer != MessageBoxResult.Yes) return;
 
         try
         {
-            await _backup.RestoreAsync(selected.Path, _settings.GameDirectory, _settings.BackupDirectory, _appCancellation.Token);
+            _gameFileOperations++;
+            try { await _backup.RestoreAsync(selected.Path, _settings.GameDirectory, _settings.BackupDirectory, _appCancellation.Token); }
+            finally { _gameFileOperations--; }
             if (!_allowClose) MessageBox.Show(this, "The backup was restored.", "Restore backup", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
@@ -745,6 +761,7 @@ public partial class MainWindow : Window
             catch (OperationCanceledException) { return; }
             if (_session is null && _launchTask is null && Directory.Exists(_settings.GameDirectory))
             {
+                _gameFileOperations++;
                 try
                 {
                     if (await _backup.MatchesLatestBackupAsync(_settings.GameDirectory, _settings.BackupDirectory, _appCancellation.Token))
@@ -757,6 +774,7 @@ public partial class MainWindow : Window
                 }
                 catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested) { return; }
                 catch (Exception ex) { _events.Log("Scheduled backup failed", ex.Message, ScanCategory.Suspicious); }
+                finally { _gameFileOperations--; }
             }
         }
     }

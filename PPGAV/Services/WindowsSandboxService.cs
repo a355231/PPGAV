@@ -138,7 +138,14 @@ public sealed class WindowsSandboxService
             }
             if (cleanupError is null && markerCreated)
             {
-                try { DeleteVerifiedSession(sessionRoot, markerPath, ReadAndValidateManifest(sessionRoot, markerPath, sessionId)); }
+                try
+                {
+                    // Windows Sandbox runs one instance at a time, so a running host after a sandbox this call started is
+                    // ours and may still be shutting down. A failed start with no sandbox of ours leaves nothing to wait for.
+                    if (launchedProcess is not null && HasAnyWindowsSandboxProcess())
+                        throw new IOException("A Windows Sandbox host is still shutting down; the partial staging was retained.");
+                    DeleteVerifiedSession(sessionRoot, markerPath, ReadAndValidateManifest(sessionRoot, markerPath, sessionId));
+                }
                 catch (Exception ex) { cleanupError = ex; _events.Log("Sandbox staging cleanup needed", $"Partial staging was retained for safe review: {ex.Message}", ScanCategory.Suspicious); }
             }
             else if (cleanupError is null)
@@ -189,6 +196,13 @@ public sealed class WindowsSandboxService
 
     private async ValueTask CleanupSessionAsync(AppSettings settings, string stagedRoot, string sessionRoot, string marker, string sessionId)
     {
+        // The launcher can exit while the sandbox host is still shutting down. Staging must not be read for
+        // save persistence or deleted while any Windows Sandbox process can still write to it.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+        while (HasAnyWindowsSandboxProcess() && DateTimeOffset.UtcNow < deadline) await Task.Delay(TimeSpan.FromMilliseconds(500));
+        if (HasAnyWindowsSandboxProcess())
+            throw new IOException("Windows Sandbox is still running; save persistence and staging cleanup were deferred. Recovery retries at the next start.");
+
         Exception? saveError = null;
         try
         {
@@ -420,14 +434,21 @@ public sealed class WindowsSandboxService
         }
     }
 
+    // Windows Sandbox is hosted by several executables: the launcher, the client window, and the per-session host.
+    // Checking only the launcher let recovery treat a running sandbox as gone.
+    private static readonly string[] WindowsSandboxProcessNames = ["WindowsSandbox", "WindowsSandboxClient", "WindowsSandboxRemoteSession"];
+
     private static bool HasAnyWindowsSandboxProcess()
     {
         try
         {
-            foreach (var process in Process.GetProcessesByName("WindowsSandbox"))
+            foreach (var name in WindowsSandboxProcessNames)
             {
-                using (process)
-                    if (!process.HasExited) return true;
+                foreach (var process in Process.GetProcessesByName(name))
+                {
+                    using (process)
+                        if (!process.HasExited) return true;
+                }
             }
             return false;
         }

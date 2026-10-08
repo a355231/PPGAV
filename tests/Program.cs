@@ -71,6 +71,10 @@ static class SmokeTests
             TestWatcherScanToleratesOpenAndDeletedFiles(root);
             await TestScheduledBackupDetectsUnchangedGame(root);
             TestSafeModeDisablesCompiledMods(root);
+            TestNestedArchiveEntryNamesAreNotDuplicates(root);
+            TestExecutableInRuntimeDataIsFlagged(root);
+            TestEventLogRotatesLargeFiles(root);
+            await TestRestoreRemovesFilesAddedAfterBackup(root);
             Console.WriteLine($"PASS: {_passed} smoke tests");
             return 0;
         }
@@ -807,6 +811,67 @@ static class SmokeTests
         try { session.Process.Kill(true); } catch { }
         session.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Assert(File.Exists(Path.Combine(compiled, "cache.hash")), "Safe Mode did not restore CompiledMods");
+        _passed++;
+    }
+
+    private static void TestNestedArchiveEntryNamesAreNotDuplicates(string root)
+    {
+        // Nested packages legitimately reuse entry names such as Info.json; only a repeat inside one archive is suspicious.
+        var mods = Path.Combine(root, "nested-entry-names", "Mods", "pkg"); Directory.CreateDirectory(mods);
+        var inner = Path.Combine(root, "nested-entry-names-inner.zip");
+        using (var nested = ZipFile.Open(inner, ZipArchiveMode.Create)) { using var writer = new StreamWriter(nested.CreateEntry("Info.json").Open()); writer.Write("{}"); }
+        using (var outer = ZipFile.Open(Path.Combine(mods, "outer.zip"), ZipArchiveMode.Create))
+        {
+            using (var writer = new StreamWriter(outer.CreateEntry("Info.json").Open())) writer.Write("{}");
+            using var source = File.OpenRead(inner); using var target = outer.CreateEntry("inner.zip").Open(); source.CopyTo(target);
+        }
+        var report = new ScannerService().Scan(Path.Combine(root, "nested-entry-names"));
+        Assert(!report.Findings.Any(f => f.Rule == "duplicate-archive-entry"), "entry names shared by nested archives were reported as duplicates");
+        _passed++;
+    }
+
+    private static void TestExecutableInRuntimeDataIsFlagged(string root)
+    {
+        // Settings, saves, logs and temp folders are outside the integrity baseline, so code placed there must not pass as data.
+        var game = Path.Combine(root, "runtime-data-code"); var logs = Path.Combine(game, "Logs"); Directory.CreateDirectory(logs);
+        var pe = new byte[1024]; pe[0] = (byte)'M'; pe[1] = (byte)'Z'; BitConverter.GetBytes(512).CopyTo(pe, 0x3C); pe[512] = (byte)'P'; pe[513] = (byte)'E';
+        File.WriteAllBytes(Path.Combine(logs, "helper.bin"), pe);
+        File.WriteAllText(Path.Combine(logs, "Main.log"), "started");
+        var report = new ScannerService().Scan(game);
+        Assert(report.Findings.Any(f => f.Rule == "executable-in-runtime-data" && f.Category == ScanCategory.Suspicious), "a PE image in Logs was not flagged as code in runtime data");
+        Assert(PreflightDecisionEngine.Decide(report, true) == PreflightAction.BlockAll, "code in runtime data did not block the launch");
+        Assert(!report.Findings.Any(f => f.FilePath.EndsWith("Main.log", StringComparison.OrdinalIgnoreCase)), "an ordinary game log was flagged");
+        _passed++;
+    }
+
+    private static void TestEventLogRotatesLargeFiles(string root)
+    {
+        // The log is read in full at startup, so it must not grow without bound.
+        var path = Path.Combine(root, "rotate-logs", "events.jsonl");
+        var events = new EventLogService(path);
+        var detail = new string('x', 4096);
+        for (var i = 0; i < 1400; i++) events.Log("rotation-test", detail);
+        Assert(File.Exists(path + ".1"), "event log was not rotated after passing its size limit");
+        Assert(new FileInfo(path).Length <= 5L * 1024 * 1024 + 8192, "active event log exceeded its size limit");
+        _passed++;
+    }
+
+    private static async Task TestRestoreRemovesFilesAddedAfterBackup(string root)
+    {
+        // A restore must return the game folder to the backup state. A mod added after the backup must not survive it.
+        var game = Path.Combine(root, "restore-extras-game");
+        var backups = Path.Combine(root, "restore-extras-backups");
+        Directory.CreateDirectory(Path.Combine(game, "Mods"));
+        File.WriteAllText(Path.Combine(game, "settings.json"), "original");
+        File.WriteAllText(Path.Combine(game, "Mods", "kept.cs"), "original mod");
+        var service = new BackupService(TestEvents(root), Path.Combine(root, "restore-extras-safety"));
+        var backup = await service.CreateBackupAsync(game, backups, 4);
+        File.WriteAllText(Path.Combine(game, "Mods", "dropped-later.dll"), "added after the backup");
+        File.WriteAllText(Path.Combine(game, "settings.json"), "changed");
+        await service.RestoreAsync(backup.Path, game, backups);
+        Assert(File.ReadAllText(Path.Combine(game, "settings.json")) == "original", "restore did not reapply the backup content");
+        Assert(File.Exists(Path.Combine(game, "Mods", "kept.cs")), "restore removed a file that belongs to the backup");
+        Assert(!File.Exists(Path.Combine(game, "Mods", "dropped-later.dll")), "restore left a file that was added after the backup");
         _passed++;
     }
 
